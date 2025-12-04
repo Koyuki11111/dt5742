@@ -8,17 +8,18 @@
 set -e  # Exit on error
 
 # Default configuration file (unified)
-PIPELINE_CONFIG="pipeline_config.json"
+PIPELINE_CONFIG="converter_config.json"
 
 # Output directory is read from JSON configs (default: "output")
-# Edit wave_converter_config.json and analysis_config.json to change output_dir
+# Edit converter_config.json (common.output_dir) to change output_dir
 OUTPUT_DIR="output"
 
-# Default intermediate/output files (relative names)
+# Default intermediate/output files (relative names). For a minimal smoke test,
+# drop a few tiny mixed-length inputs under ./temp/smoke/ (see README) and run:
+#   ./run_full_pipeline.sh --config converter_config.json
 RAW_ROOT="waveforms.root"
 ANALYSIS_ROOT="waveforms_analyzed.root"
-RAW_HDF5="waveforms_raw.h5"
-ANALYSIS_HDF5="waveforms_analyzed.h5"
+ANALYSIS_HDF5="waveforms_analyzed.hdf5"
 
 # Parse command line arguments
 RUN_STAGE1=true
@@ -34,11 +35,10 @@ Full waveform processing pipeline
 Usage: $0 [options]
 
 Options:
-    --config FILE            Pipeline configuration (default: pipeline_config.json)
+    --config FILE            Pipeline configuration (default: converter_config.json)
     --raw-root FILE          Raw ROOT filename (default: waveforms.root)
     --analysis-root FILE     Analysis ROOT filename (default: waveforms_analyzed.root)
-    --raw-hdf5 FILE          Raw HDF5 filename (default: waveforms_raw.h5)
-    --analysis-hdf5 FILE     Analysis HDF5 filename (default: waveforms_analyzed.h5)
+    --analysis-hdf5 FILE     Analysis HDF5 filename (default: waveforms_analyzed.hdf5)
     --stage1-only            Run only stage 1 (convert to ROOT)
     --stage2-only            Run only stage 2 (analysis)
     --stage3-only            Run only stage 3 (export to HDF5)
@@ -58,12 +58,12 @@ Parallel Processing:
 Stages:
     Stage 1: convert_to_root     - Convert binary/ASCII waveforms to ROOT format
     Stage 2: analyze_waveforms   - Extract timing and amplitude features
-    Stage 3: export_to_hdf5      - Export ROOT data to HDF5 format
+    Stage 3: export_to_hdf5      - Export analyzed ROOT data to HDF5 format
 
 Output Organization:
     All outputs are organized in subdirectories (default: output/):
       output/root/            - ROOT files (waveforms.root, waveforms_analyzed.root)
-      output/hdf5/            - HDF5 files (waveforms_raw.h5, waveforms_analyzed.h5)
+      output/hdf5/            - HDF5 files (waveforms_analyzed.hdf5 and sensor splits)
       output/waveform_plots/  - Waveform plots debug output (if enabled)
       output/temp/            - Temporary files for parallel processing
 
@@ -81,7 +81,7 @@ Examples:
     # Run only conversion step
     $0 --stage1-only
 
-    # Skip analysis, only convert and export raw waveforms
+    # Skip analysis, only convert (no analysis HDF5 will be produced)
     $0 --skip-stage2
 
     # Custom configuration files
@@ -107,10 +107,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --analysis-root)
             ANALYSIS_ROOT="$2"
-            shift 2
-            ;;
-        --raw-hdf5)
-            RAW_HDF5="$2"
             shift 2
             ;;
         --analysis-hdf5)
@@ -282,7 +278,7 @@ fi
 
 # Stage 3: Export to HDF5
 if [ "$RUN_STAGE3" = true ]; then
-    echo "Stage 3: Exporting to HDF5 format..."
+    echo "Stage 3: Exporting analyzed data to HDF5 format..."
 
     if [ ! -f "./export_to_hdf5" ]; then
         echo "ERROR: export_to_hdf5 executable not found"
@@ -317,46 +313,12 @@ except:
         SENSOR_IDS=""
     fi
 
-    # Export raw waveforms if they exist
-    if [ -f "$OUTPUT_DIR/root/$RAW_ROOT" ] && [ "$RUN_STAGE1" = true ] || [ "$RUN_STAGE1" = false ]; then
-        if [ -n "$SENSOR_IDS" ]; then
-            # Export per sensor
-            for SENSOR_ID in $SENSOR_IDS; do
-                OUTPUT_FILE="waveforms_sensor$(printf '%02d' $SENSOR_ID).h5"
-                echo "  Exporting raw waveforms for sensor $SENSOR_ID..."
-                echo "    Input:  $OUTPUT_DIR/root/$RAW_ROOT"
-                echo "    Output: $OUTPUT_DIR/hdf5/$OUTPUT_FILE"
-
-                ./export_to_hdf5 --mode raw --input "$RAW_ROOT" --tree Waveforms \
-                    --output "$OUTPUT_FILE" --output-dir "$OUTPUT_DIR" \
-                    --sensor-id "$SENSOR_ID" --sensor-mapping "$PIPELINE_CONFIG"
-
-                if [ $? -ne 0 ]; then
-                    echo "WARNING: Raw waveform export failed for sensor $SENSOR_ID (continuing anyway)"
-                fi
-            done
-        else
-            # Export all channels to single file
-            echo "  Exporting raw waveforms..."
-            echo "    Input:  $OUTPUT_DIR/root/$RAW_ROOT"
-            echo "    Output: $OUTPUT_DIR/hdf5/$RAW_HDF5"
-
-            ./export_to_hdf5 --mode raw --input "$RAW_ROOT" --tree Waveforms \
-                --output "$RAW_HDF5" --output-dir "$OUTPUT_DIR"
-
-            if [ $? -ne 0 ]; then
-                echo "WARNING: Raw waveform export failed (continuing anyway)"
-            fi
-        fi
-        echo ""
-    fi
-
     # Export analysis features if they exist
     if [ -f "$OUTPUT_DIR/root/$ANALYSIS_ROOT" ] && [ "$RUN_STAGE2" = true ] || [ "$RUN_STAGE2" = false ]; then
         if [ -n "$SENSOR_IDS" ]; then
             # Export per sensor
             for SENSOR_ID in $SENSOR_IDS; do
-                OUTPUT_FILE="waveforms_analyzed_sensor$(printf '%02d' $SENSOR_ID).h5"
+                OUTPUT_FILE="waveforms_analyzed_sensor$(printf '%02d' $SENSOR_ID).hdf5"
                 echo "  Exporting analysis features for sensor $SENSOR_ID..."
                 echo "    Input:  $OUTPUT_DIR/root/$ANALYSIS_ROOT"
                 echo "    Output: $OUTPUT_DIR/hdf5/$OUTPUT_FILE"
@@ -399,7 +361,7 @@ if [ -f "$OUTPUT_DIR/root/$ANALYSIS_ROOT" ]; then
 fi
 
 # List HDF5 files (sensor-specific or single file)
-HDF5_FILES=$(ls "$OUTPUT_DIR/hdf5/"*.h5 2>/dev/null)
+HDF5_FILES=$(ls "$OUTPUT_DIR/hdf5/"*.hdf5 2>/dev/null)
 if [ -n "$HDF5_FILES" ]; then
     echo "  HDF5 files:"
     for FILE in $HDF5_FILES; do

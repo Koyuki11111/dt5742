@@ -6,7 +6,7 @@
 set -e
 
 # Default values (can be overridden by config or command line)
-DEFAULT_CONFIG="pipeline_config.json"
+DEFAULT_CONFIG="converter_config.json"
 DEFAULT_CHUNK_SIZE=100
 DEFAULT_MAX_CORES=8
 DEFAULT_TEMP_DIR="./temp_analysis"
@@ -26,7 +26,7 @@ Parallel waveform analysis
 Usage: $0 [options]
 
 Options:
-    --config FILE       Pipeline configuration file (default: pipeline_config.json)
+    --config FILE       Pipeline configuration file (default: converter_config.json)
     --input FILE        Input ROOT file name (relative to output_dir/root/)
     --output FILE       Output ROOT file name (relative to output_dir/root/)
     --chunk-size N      Events per chunk (default: 100)
@@ -35,7 +35,7 @@ Options:
     -h, --help          Show this help
 
 Example:
-    $0 --config pipeline_config.json --input waveforms.root --output waveforms_analyzed.root
+    $0 --config converter_config.json --input waveforms.root --output waveforms_analyzed.root
 
 EOF
 }
@@ -132,21 +132,35 @@ echo ""
 
 # Get total number of events from ROOT file using temporary macro
 echo "Counting events in input file..."
-cat > /tmp/count_events_$$.C <<MACRO_EOF
-void count_events_$$() {
-    TFile *f = TFile::Open("$INPUT_PATH");
+# cat > /tmp/count_events_$$.C <<MACRO_EOF
+# void count_events_$$() {
+#     TFile *f = TFile::Open("$INPUT_PATH");
+#     if (f && !f->IsZombie()) {
+#         TTree *t = (TTree*)f->Get("Waveforms");
+#         if (t) {
+#             std::cout << "NUM_ENTRIES=" << t->GetEntries() << std::endl;
+#         }
+#         f->Close();
+#     }
+# }
+# MACRO_EOF
+
+# NUM_EVENTS=$(root -l -b -q "/tmp/count_events_$$.C" 2>&1 | grep "NUM_ENTRIES=" | cut -d= -f2)
+# rm -f /tmp/count_events_$$.C
+NUM_EVENTS=$(
+INPUT_PATH="$INPUT_PATH" root -l -b -q -e '
+    TFile *f = TFile::Open(gSystem->Getenv("INPUT_PATH"));
     if (f && !f->IsZombie()) {
-        TTree *t = (TTree*)f->Get("Waveforms");
+        TTree *t = nullptr;
+        f->GetObject("Waveforms", t);
         if (t) {
             std::cout << "NUM_ENTRIES=" << t->GetEntries() << std::endl;
         }
         f->Close();
     }
-}
-MACRO_EOF
-
-NUM_EVENTS=$(root -l -b -q "/tmp/count_events_$$.C" 2>&1 | grep "NUM_ENTRIES=" | cut -d= -f2)
-rm -f /tmp/count_events_$$.C
+    gSystem->Exit(0);
+' 2>&1 | grep "NUM_ENTRIES=" | cut -d= -f2
+)
 
 if [ -z "$NUM_EVENTS" ] || [ "$NUM_EVENTS" -le 0 ]; then
     echo "ERROR: Could not determine number of events in input file"

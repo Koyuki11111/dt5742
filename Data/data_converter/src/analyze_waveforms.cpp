@@ -1,0 +1,608 @@
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <iostream>
+#include <map>
+#include <string>
+#include <vector>
+
+#include "utils/file_io.h"
+#include "TFile.h"
+#include "TDirectory.h"
+#include "TTree.h"
+#include "TGraph.h"
+#include "TCanvas.h"
+#include "TLegend.h"
+#include "TLine.h"
+#include "TMarker.h"
+#include "TLatex.h"
+#include "TH2F.h"
+
+#include "config/analysis_config.h"
+#include "analysis/waveform_math.h"
+#include "analysis/waveform_plotting.h"
+
+
+namespace {
+
+bool EnsureParentDirectory(const std::string &path) {
+  size_t lastSlash = path.find_last_of('/');
+  if (lastSlash != std::string::npos) {
+    std::string dirPath = path.substr(0, lastSlash);
+    if (!CreateDirectoryIfNeeded(dirPath)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+enum class NsamplesPolicy { kStrict, kPad };
+
+NsamplesPolicy ResolveNsamplesPolicy(const std::string &policyText) {
+  std::string lowered = policyText;
+  std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (lowered == "pad") {
+    return NsamplesPolicy::kPad;
+  }
+  if (lowered != "strict") {
+    std::cerr << "WARNING: unknown nsamples_policy '" << policyText
+              << "', defaulting to 'strict'" << std::endl;
+  }
+  return NsamplesPolicy::kStrict;
+}
+
+bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t eventEnd = -1) {
+  // Create waveform plots ROOT file if enabled
+  TFile *waveformPlotsFile = nullptr;
+  auto openWaveformPlotsFile = [&](TFile *&outFile) {
+    if (!cfg.waveform_plots_enabled) {
+      return;
+    }
+    std::string waveformPlotsFileName =
+        BuildOutputPath(cfg.output_dir(), "waveform_plots",
+                        cfg.waveform_plots_dir + ".root");
+    if (!EnsureParentDirectory(waveformPlotsFileName)) {
+      std::cerr << "WARNING: Failed to create waveform plots output directory for "
+                << waveformPlotsFileName << std::endl;
+      return;
+    }
+    outFile = TFile::Open(waveformPlotsFileName.c_str(), "RECREATE");
+    if (!outFile || outFile->IsZombie()) {
+      std::cerr << "WARNING: Failed to create waveform plots output file "
+                << waveformPlotsFileName << std::endl;
+      std::cerr << "         Continuing without waveform plots output..." << std::endl;
+      outFile = nullptr;
+      return;
+    }
+    std::cout << "Waveform plots output enabled. Saving to: " << waveformPlotsFileName << std::endl;
+    if (cfg.waveform_plots_only_signal) {
+      std::cout << "  Only saving waveforms with detected signals (SNR > "
+                << cfg.snr_threshold << ")" << std::endl;
+    }
+  };
+  openWaveformPlotsFile(waveformPlotsFile);
+
+  // Build input path: output_dir/root/input_root
+  std::string inputPath = BuildOutputPath(cfg.output_dir(), "root", cfg.input_root());
+
+  // Open input ROOT file
+  TFile *inputFile = TFile::Open(inputPath.c_str(), "READ");
+  if (!inputFile || inputFile->IsZombie()) {
+    std::cerr << "ERROR: cannot open input ROOT file " << inputPath << std::endl;
+    return false;
+  }
+  std::cout << "Reading input file: " << inputPath << std::endl;
+
+  TTree *inputTree = dynamic_cast<TTree *>(inputFile->Get(cfg.input_tree().c_str()));
+  if (!inputTree) {
+    std::cerr << "ERROR: cannot find tree " << cfg.input_tree() << std::endl;
+    inputFile->Close();
+    return false;
+  }
+
+  // Get number of entries
+  Long64_t totalEntries = inputTree->GetEntries();
+  if (totalEntries == 0) {
+    std::cerr << "ERROR: input tree has no entries" << std::endl;
+    inputFile->Close();
+    return false;
+  }
+
+  // Determine event range to process
+  Long64_t startEntry = (eventStart >= 0) ? eventStart : 0;
+  Long64_t endEntry = (eventEnd >= 0) ? eventEnd : totalEntries;
+
+  // Validate range
+  if (startEntry < 0) startEntry = 0;
+  if (endEntry > totalEntries) endEntry = totalEntries;
+  if (startEntry >= endEntry) {
+    std::cerr << "ERROR: invalid event range [" << startEntry << ", " << endEntry << ")" << std::endl;
+    inputFile->Close();
+    return false;
+  }
+
+  Long64_t nEntries = endEntry - startEntry;
+  std::cout << "Processing event range [" << startEntry << ", " << endEntry << ") - "
+            << nEntries << " events" << std::endl;
+
+  const NsamplesPolicy policy = ResolveNsamplesPolicy(cfg.common.nsamples_policy);
+
+  // Set up input branches
+  int eventIdx = 0;
+  int nChannels = 0;
+  int nsamples = 0;
+  std::vector<float> *timeAxis = nullptr;
+  std::vector<std::vector<float> *> chPed(cfg.n_channels(), nullptr);
+  std::vector<int> *nsamplesPerChannel = nullptr;
+
+  inputTree->SetBranchAddress("event", &eventIdx);
+  inputTree->SetBranchAddress("n_channels", &nChannels);
+  inputTree->SetBranchAddress("nsamples", &nsamples);
+  inputTree->SetBranchAddress("time_ns", &timeAxis);
+  if (inputTree->GetBranch("nsamples_per_channel")) {
+    inputTree->SetBranchAddress("nsamples_per_channel", &nsamplesPerChannel);
+  }
+
+  for (int ch = 0; ch < cfg.n_channels(); ++ch) {
+    char bname[32];
+    std::snprintf(bname, sizeof(bname), "ch%02d_ped", ch);
+    if (inputTree->GetBranch(bname)) {
+      inputTree->SetBranchAddress(bname, &chPed[ch]);
+    }
+  }
+
+  // Build output path: output_dir/root/output_root
+  std::string outputPath = BuildOutputPath(cfg.output_dir(), "root", cfg.output_root());
+
+  // Create directory if needed
+  size_t lastSlash = outputPath.find_last_of('/');
+  if (lastSlash != std::string::npos) {
+    std::string dirPath = outputPath.substr(0, lastSlash);
+    if (!CreateDirectoryIfNeeded(dirPath)) {
+      std::cerr << "ERROR: failed to create output directory: " << dirPath << std::endl;
+      inputFile->Close();
+      return false;
+    }
+  }
+
+  // Create output ROOT file
+  TFile *outputFile = TFile::Open(outputPath.c_str(), "RECREATE");
+  if (!outputFile || outputFile->IsZombie()) {
+    std::cerr << "ERROR: cannot create output ROOT file " << outputPath << std::endl;
+    inputFile->Close();
+    return false;
+  }
+  std::cout << "Creating output file: " << outputPath << std::endl;
+
+  TTree *outputTree = new TTree(cfg.output_tree().c_str(), "Analyzed waveform features");
+
+  // Create output branches - per channel vectors
+  int event = 0;
+  std::vector<int> sensorID(cfg.n_channels());
+  std::vector<int> stripID(cfg.n_channels());
+  std::vector<bool> hasSignal(cfg.n_channels());
+  std::vector<float> baseline(cfg.n_channels());
+  std::vector<float> rmsNoise(cfg.n_channels());
+  std::vector<float> noise1Point(cfg.n_channels());
+  std::vector<float> ampMinBefore(cfg.n_channels());
+  std::vector<float> ampMaxBefore(cfg.n_channels());
+  std::vector<float> ampMax(cfg.n_channels());
+  std::vector<float> charge(cfg.n_channels());
+  std::vector<float> signalOverNoise(cfg.n_channels());
+  std::vector<float> peakTime(cfg.n_channels());
+  std::vector<float> riseTime(cfg.n_channels());
+  std::vector<float> slewRate(cfg.n_channels());
+
+  // Initialize sensor and strip IDs from config
+  for (int ch = 0; ch < cfg.n_channels(); ++ch) {
+    sensorID[ch] = cfg.sensor_ids[ch];
+    stripID[ch] = cfg.strip_ids[ch];
+  }
+
+  auto defineScalarBranches = [&]() {
+    outputTree->Branch("event", &event);
+    outputTree->Branch("sensorID", &sensorID);
+    outputTree->Branch("stripID", &stripID);
+    outputTree->Branch("hasSignal", &hasSignal);
+    outputTree->Branch("baseline", &baseline);
+    outputTree->Branch("rmsNoise", &rmsNoise);
+    outputTree->Branch("noise1Point", &noise1Point);
+    outputTree->Branch("ampMinBefore", &ampMinBefore);
+    outputTree->Branch("ampMaxBefore", &ampMaxBefore);
+    outputTree->Branch("ampMax", &ampMax);
+    outputTree->Branch("charge", &charge);
+    outputTree->Branch("signalOverNoise", &signalOverNoise);
+    outputTree->Branch("peakTime", &peakTime);
+    outputTree->Branch("riseTime", &riseTime);
+    outputTree->Branch("slewRate", &slewRate);
+  };
+
+  // Multi-threshold timing branches (per channel, per threshold)
+  const size_t nCFD = cfg.cfd_thresholds.size();
+  const size_t nLE = cfg.le_thresholds.size();
+  const size_t nCharge = cfg.charge_thresholds.size();
+
+  std::vector<std::vector<float>> timeCFD(cfg.n_channels(), std::vector<float>(nCFD));
+  std::vector<std::vector<float>> jitterCFD(cfg.n_channels(), std::vector<float>(nCFD));
+  std::vector<std::vector<float>> timeLE(cfg.n_channels(), std::vector<float>(nLE));
+  std::vector<std::vector<float>> jitterLE(cfg.n_channels(), std::vector<float>(nLE));
+  std::vector<std::vector<float>> totLE(cfg.n_channels(), std::vector<float>(nLE));
+  std::vector<std::vector<float>> timeCharge(cfg.n_channels(), std::vector<float>(nCharge));
+
+  auto defineTimingBranches = [&]() {
+    for (int ch = 0; ch < cfg.n_channels(); ++ch) {
+      for (size_t i = 0; i < nCFD; ++i) {
+        outputTree->Branch(Form("ch%02d_timeCFD_%dpc", ch, cfg.cfd_thresholds[i]),
+                          &timeCFD[ch][i]);
+        outputTree->Branch(Form("ch%02d_jitterCFD_%dpc", ch, cfg.cfd_thresholds[i]),
+                          &jitterCFD[ch][i]);
+      }
+      for (size_t i = 0; i < nLE; ++i) {
+        outputTree->Branch(Form("ch%02d_timeLE_%.1fmV", ch, cfg.le_thresholds[i]),
+                          &timeLE[ch][i]);
+        outputTree->Branch(Form("ch%02d_jitterLE_%.1fmV", ch, cfg.le_thresholds[i]),
+                          &jitterLE[ch][i]);
+        outputTree->Branch(Form("ch%02d_totLE_%.1fmV", ch, cfg.le_thresholds[i]),
+                          &totLE[ch][i]);
+      }
+      for (size_t i = 0; i < nCharge; ++i) {
+        outputTree->Branch(Form("ch%02d_timeCharge_%dpc", ch, cfg.charge_thresholds[i]),
+                          &timeCharge[ch][i]);
+      }
+    }
+  };
+
+  defineScalarBranches();
+  defineTimingBranches();
+
+  // Process all events in the specified range
+  std::cout << "Analyzing " << nEntries << " events..." << std::endl;
+
+  // Calculate progress reporting interval (report at least 10 times)
+  Long64_t reportInterval = (nEntries < 10) ? 1 : nEntries / 10;
+  bool nsamplesError = false;
+  bool loggedNsamplesTrim = false;
+  std::vector<float> trimmedAmpBuf;
+  std::vector<float> trimmedTimeBuf;
+
+  for (Long64_t i = 0; i < nEntries; ++i) {
+    Long64_t entry = startEntry + i;
+
+    if (i % reportInterval == 0 || i == nEntries - 1) {
+      std::cout << "Processing entry " << entry << " (" << i << " / " << nEntries
+                << " = " << (100 * i / nEntries) << "%)" << std::endl;
+    }
+
+    inputTree->GetEntry(entry);
+    event = eventIdx;
+
+    if (!timeAxis || timeAxis->empty()) {
+      std::cerr << "WARNING: empty time axis at entry " << entry << std::endl;
+      continue;
+    }
+
+    std::vector<int> effectiveSamples(cfg.n_channels(), 0);
+    int minSamples = std::numeric_limits<int>::max();
+    int maxSamples = 0;
+    bool haveSamples = false;
+
+    for (int ch = 0; ch < cfg.n_channels(); ++ch) {
+      if (!chPed[ch] || chPed[ch]->empty()) {
+        continue;
+      }
+
+      int chSamples = nsamples;
+      if (nsamplesPerChannel &&
+          ch < static_cast<int>(nsamplesPerChannel->size())) {
+        chSamples = nsamplesPerChannel->at(ch);
+      }
+
+      chSamples =
+          std::min(chSamples, static_cast<int>(chPed[ch]->size()));
+      chSamples =
+          std::min(chSamples, static_cast<int>(timeAxis->size()));
+
+      if (chSamples <= 0) {
+        continue;
+      }
+
+      haveSamples = true;
+      effectiveSamples[ch] = chSamples;
+      minSamples = std::min(minSamples, chSamples);
+      maxSamples = std::max(maxSamples, chSamples);
+    }
+
+    if (!haveSamples) {
+      continue;
+    }
+
+    const bool hasMismatch = maxSamples != minSamples;
+    if (hasMismatch && policy == NsamplesPolicy::kStrict) {
+      std::cerr << "ERROR: nsamples mismatch at entry " << entry
+                << " (min " << minSamples << ", max " << maxSamples << ")"
+                << std::endl;
+      nsamplesError = true;
+      break;
+    }
+
+    if (hasMismatch && !loggedNsamplesTrim &&
+        policy == NsamplesPolicy::kPad) {
+      std::cout << "INFO: nsamples mismatch detected at entry " << entry
+                << ", trimming analysis to per-channel sample counts" << std::endl;
+      loggedNsamplesTrim = true;
+    }
+
+    // Analyze each channel
+    for (int ch = 0; ch < cfg.n_channels(); ++ch) {
+      if (!chPed[ch] || chPed[ch]->empty()) {
+        continue;
+      }
+
+      const int samplesToUse = effectiveSamples[ch];
+      if (samplesToUse <= 0) {
+        continue;
+      }
+
+      const bool needsTrim =
+          samplesToUse != static_cast<int>(chPed[ch]->size()) ||
+          static_cast<size_t>(samplesToUse) != timeAxis->size();
+
+      const std::vector<float> *ampPtr = chPed[ch];
+      const std::vector<float> *timePtr = timeAxis;
+
+      if (needsTrim) {
+        trimmedAmpBuf.assign(chPed[ch]->begin(),
+                             chPed[ch]->begin() + samplesToUse);
+        trimmedTimeBuf.assign(timeAxis->begin(),
+                              timeAxis->begin() + samplesToUse);
+        ampPtr = &trimmedAmpBuf;
+        timePtr = &trimmedTimeBuf;
+      }
+
+      WaveformFeatures features = AnalyzeWaveform(*ampPtr, *timePtr, cfg, ch);
+
+      hasSignal[ch] = features.hasSignal;
+      baseline[ch] = features.baseline;
+      rmsNoise[ch] = features.rmsNoise;
+      noise1Point[ch] = features.noise1Point;
+      ampMinBefore[ch] = features.ampMinBefore;
+      ampMaxBefore[ch] = features.ampMaxBefore;
+      ampMax[ch] = features.ampMax;
+      charge[ch] = features.charge;
+      signalOverNoise[ch] = features.signalOverNoise;
+      peakTime[ch] = features.peakTime;
+      riseTime[ch] = features.riseTime;
+      slewRate[ch] = features.slewRate;
+
+      for (size_t i = 0; i < nCFD && i < features.timeCFD.size(); ++i) {
+        timeCFD[ch][i] = features.timeCFD[i];
+        jitterCFD[ch][i] = features.jitterCFD[i];
+      }
+      for (size_t i = 0; i < nLE && i < features.timeLE.size(); ++i) {
+        timeLE[ch][i] = features.timeLE[i];
+        jitterLE[ch][i] = features.jitterLE[i];
+        totLE[ch][i] = features.totLE[i];
+      }
+      for (size_t i = 0; i < nCharge && i < features.timeCharge.size(); ++i) {
+        timeCharge[ch][i] = features.timeCharge[i];
+      }
+
+      // Save waveform plots if enabled
+      if (waveformPlotsFile) {
+        // Check if we should save this waveform
+        bool shouldSave = !cfg.waveform_plots_only_signal || features.hasSignal;
+        if (shouldSave) {
+          SaveWaveformPlots(waveformPlotsFile, eventIdx, ch, *chPed[ch], *timeAxis, features, cfg);
+        }
+      }
+    }
+
+    // Create 2D histograms for each sensor showing signal amplitudes
+    if (waveformPlotsFile) {
+      // Determine which sensors are present and how many strips each has
+      std::map<int, std::vector<int>> sensorStrips;  // sensor ID -> list of strip IDs
+      std::map<int, std::vector<int>> sensorChannels; // sensor ID -> list of channel indices
+
+      for (int ch = 0; ch < cfg.n_channels(); ++ch) {
+        int sensorID = cfg.sensor_ids[ch];
+        int stripID = cfg.strip_ids[ch];
+        sensorStrips[sensorID].push_back(stripID);
+        sensorChannels[sensorID].push_back(ch);
+      }
+
+      // Create event directory if not exists
+      char eventDirName[64];
+      std::snprintf(eventDirName, sizeof(eventDirName), "event_%06d", eventIdx);
+      TDirectory *eventDir = waveformPlotsFile->GetDirectory(eventDirName);
+      if (!eventDir) {
+        eventDir = waveformPlotsFile->mkdir(eventDirName);
+      }
+
+      // Create histogram for each sensor
+      for (const auto &sensorPair : sensorStrips) {
+        int sensorID = sensorPair.first;
+        const std::vector<int> &strips = sensorPair.second;
+        const std::vector<int> &channels = sensorChannels[sensorID];
+
+        // Find strip range
+        int minStrip = *std::min_element(strips.begin(), strips.end());
+        int maxStrip = *std::max_element(strips.begin(), strips.end());
+        int nStrips = maxStrip - minStrip + 1;
+
+        // Create histogram: 1 bin in X, nStrips bins in Y
+        TH2F *hist = new TH2F(Form("sensor%02d_amplitude_map", sensorID),
+                              Form("Event %d - Sensor %02d Amplitude Map;X;Strip;Amplitude (V)",
+                                   eventIdx, sensorID),
+                              1, 0, 1,  // X axis: single bin
+                              nStrips, minStrip, maxStrip + 1);  // Y axis: one bin per strip
+
+        // Fill histogram with amplitude values
+        for (size_t i = 0; i < channels.size(); ++i) {
+          int ch = channels[i];
+          int stripID = strips[i];
+          float amplitude = ampMax[ch];  // Use maximum amplitude
+          hist->Fill(0.5, stripID, amplitude);  // X=0.5 (center of bin), Y=stripID
+        }
+
+        // Save to sensor directory within event
+        TDirectory *sensorDir = eventDir->GetDirectory(Form("sensor%02d", sensorID));
+        if (!sensorDir) {
+          sensorDir = eventDir->mkdir(Form("sensor%02d", sensorID));
+        }
+        sensorDir->cd();
+        hist->Write(hist->GetName(), TObject::kOverwrite);
+        delete hist;
+      }
+
+      waveformPlotsFile->cd();
+    }
+
+    outputTree->Fill();
+  }
+
+  if (nsamplesError) {
+    if (waveformPlotsFile) {
+      waveformPlotsFile->cd();
+      waveformPlotsFile->Close();
+      delete waveformPlotsFile;
+      waveformPlotsFile = nullptr;
+    }
+    outputFile->Close();
+    inputFile->Close();
+    return false;
+  }
+
+  outputFile->cd();
+  outputTree->Write();
+  outputFile->Close();
+  inputFile->Close();
+
+  // Close waveform plots file if it was created
+  if (waveformPlotsFile) {
+    waveformPlotsFile->cd();
+    waveformPlotsFile->Close();
+    delete waveformPlotsFile;
+    std::string waveformPlotsFullPath = BuildOutputPath(cfg.output_dir(), "waveform_plots", cfg.waveform_plots_dir + ".root");
+    std::cout << "Waveform plots output saved to " << waveformPlotsFullPath << std::endl;
+  }
+
+  std::string outputFullPath = BuildOutputPath(cfg.output_dir(), "root", cfg.output_root());
+  std::cout << "Analysis complete. Output written to " << outputFullPath << std::endl;
+  return true;
+}
+
+void PrintUsage(const char *prog) {
+  std::cout << "Analyze waveforms: Extract timing and amplitude features from ROOT file\n"
+            << "Usage: " << prog << " [options]\n"
+            << "Options:\n"
+            << "  --config PATH          Load analysis settings from JSON file\n"
+            << "  --input FILE           Override input ROOT file\n"
+            << "  --output FILE          Override output ROOT file\n"
+            << "  --event-range START:END  Process only events in range [START, END)\n"
+            << "  --waveform-plots       Enable waveform plots output (saves detailed waveform plots)\n"
+            << "  --waveform-plots-file NAME  Set waveform plots output ROOT file name (default: waveform_plots.root)\n"
+            << "  --waveform-plots-all   Save all waveforms (default: only with signal)\n"
+            << "  -h, --help             Show this help message\n";
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+  AnalysisConfig cfg;
+
+  // Try to load default config
+  std::string defaultPath = "converter_config.json";
+  std::string err;
+  if (LoadAnalysisConfigFromJson(defaultPath, cfg, &err)) {
+    std::cout << "Loaded configuration from " << defaultPath << std::endl;
+  }
+
+  // Event range parameters
+  Long64_t eventStart = -1;
+  Long64_t eventEnd = -1;
+
+  // Parse command line
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "--help" || arg == "-h") {
+      PrintUsage(argv[0]);
+      return 0;
+    } else if (arg == "--config") {
+      if (i + 1 >= argc) {
+        std::cerr << "ERROR: --config requires a value" << std::endl;
+        return 1;
+      }
+      if (!LoadAnalysisConfigFromJson(argv[++i], cfg, &err)) {
+        std::cerr << "ERROR: " << err << std::endl;
+        return 1;
+      }
+      std::cout << "Loaded configuration from " << argv[i] << std::endl;
+    } else if (arg == "--input") {
+      if (i + 1 >= argc) {
+        std::cerr << "ERROR: --input requires a value" << std::endl;
+        return 1;
+      }
+      cfg.set_input_root(argv[++i]);
+    } else if (arg == "--output") {
+      if (i + 1 >= argc) {
+        std::cerr << "ERROR: --output requires a value" << std::endl;
+        return 1;
+      }
+      cfg.set_output_root(argv[++i]);
+    } else if (arg == "--event-range") {
+      if (i + 1 >= argc) {
+        std::cerr << "ERROR: --event-range requires a value (START:END)" << std::endl;
+        return 1;
+      }
+      std::string range = argv[++i];
+      size_t colonPos = range.find(':');
+      if (colonPos == std::string::npos) {
+        std::cerr << "ERROR: --event-range format must be START:END" << std::endl;
+        return 1;
+      }
+      try {
+        eventStart = std::stoll(range.substr(0, colonPos));
+        eventEnd = std::stoll(range.substr(colonPos + 1));
+        std::cout << "Event range: [" << eventStart << ", " << eventEnd << ")" << std::endl;
+      } catch (...) {
+        std::cerr << "ERROR: invalid event range format" << std::endl;
+        return 1;
+      }
+    } else if (arg == "--waveform-plots") {
+      cfg.waveform_plots_enabled = true;
+      std::cout << "Waveform plots output enabled" << std::endl;
+    } else if (arg == "--waveform-plots-file") {
+      if (i + 1 >= argc) {
+        std::cerr << "ERROR: --waveform-plots-file requires a value" << std::endl;
+        return 1;
+      }
+      cfg.waveform_plots_dir = argv[++i];
+      // Remove .root extension if provided
+      if (cfg.waveform_plots_dir.size() > 5 &&
+          cfg.waveform_plots_dir.substr(cfg.waveform_plots_dir.size() - 5) == ".root") {
+        cfg.waveform_plots_dir = cfg.waveform_plots_dir.substr(0, cfg.waveform_plots_dir.size() - 5);
+      }
+    } else if (arg == "--waveform-plots-all") {
+      cfg.waveform_plots_only_signal = false;
+      std::cout << "Will save all waveforms (not just signals)" << std::endl;
+    } else {
+      std::cerr << "ERROR: unknown option " << arg << std::endl;
+      PrintUsage(argv[0]);
+      return 1;
+    }
+  }
+
+  try {
+    if (!RunAnalysis(cfg, eventStart, eventEnd)) {
+      return 2;
+    }
+  } catch (const std::exception &ex) {
+    std::cerr << "Unhandled exception: " << ex.what() << std::endl;
+    return 3;
+  }
+
+  return 0;
+}

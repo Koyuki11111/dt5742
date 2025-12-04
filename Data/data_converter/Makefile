@@ -2,6 +2,9 @@
 
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -O2
+SRCDIR = src
+INCLUDES = -Iinclude -I. -I/opt/homebrew/include
+JSON_LIBS = -L/opt/homebrew/lib -lsimdjson
 
 # ROOT configuration
 ROOT_CFLAGS = $(shell root-config --cflags)
@@ -19,19 +22,23 @@ TARGETS = convert_to_root analyze_waveforms export_to_hdf5
 all: $(TARGETS) parallel_analyze.sh
 
 # Stage 1: Convert binary/ASCII to ROOT
-convert_to_root: convert_to_root.cpp wave_converter_config.h
+convert_to_root: $(SRCDIR)/convert_to_root.cpp include/config/wave_converter_config.h $(SRCDIR)/utils/file_io.cpp include/utils/file_io.h
 	@echo "Building convert_to_root..."
-	$(CXX) $(CXXFLAGS) $(ROOT_CFLAGS) -o $@ $< $(ROOT_LIBS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(ROOT_CFLAGS) -o $@ $(SRCDIR)/convert_to_root.cpp $(SRCDIR)/utils/file_io.cpp $(ROOT_LIBS) $(JSON_LIBS)
 
 # Stage 2: Analyze waveforms
-analyze_waveforms: analyze_waveforms.cpp analysis_config.h
+analyze_waveforms: $(SRCDIR)/analyze_waveforms.cpp include/config/analysis_config.h $(SRCDIR)/analysis/waveform_math.cpp include/analysis/waveform_math.h $(SRCDIR)/analysis/waveform_plotting.cpp include/analysis/waveform_plotting.h
 	@echo "Building analyze_waveforms..."
-	$(CXX) $(CXXFLAGS) $(ROOT_CFLAGS) -o $@ $< $(ROOT_LIBS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(ROOT_CFLAGS) -o $@ $(SRCDIR)/analyze_waveforms.cpp $(SRCDIR)/analysis/waveform_math.cpp $(SRCDIR)/analysis/waveform_plotting.cpp $(ROOT_LIBS) $(JSON_LIBS)
 
 # Stage 3: Export to HDF5
-export_to_hdf5: export_to_hdf5.cpp
+export_to_hdf5: $(SRCDIR)/export_to_hdf5.cpp
 	@echo "Building export_to_hdf5..."
-	$(CXX) $(CXXFLAGS) $(ROOT_CFLAGS) $(HDF5_CFLAGS) -o $@ $< $(ROOT_LIBS) $(HDF5_LIBS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(ROOT_CFLAGS) $(HDF5_CFLAGS) -o $@ $< $(ROOT_LIBS) $(HDF5_LIBS) $(JSON_LIBS)
+
+# Utility object (optional for reuse)
+utils/file_io.o: $(SRCDIR)/utils/file_io.cpp include/utils/file_io.h
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $(SRCDIR)/utils/file_io.cpp -o $@
 
 # Ensure parallel_analyze.sh is executable
 parallel_analyze.sh:
@@ -49,7 +56,7 @@ clean:
 # Clean all generated files (including output data)
 cleanall: clean
 	@echo "Cleaning all generated files..."
-	rm -f *.root *.h5
+	rm -f *.root *.hdf5 *.h5
 
 # Help target
 help:
@@ -78,14 +85,14 @@ help:
 	@echo "  or run stages individually:"
 	@echo "    ./convert_to_root --config wave_converter_config.json"
 	@echo "    ./analyze_waveforms --config analysis_config.json"
-	@echo "    ./export_to_hdf5 --mode raw --input waveforms.root --output waveforms.h5"
+	@echo "    ./export_to_hdf5 --mode raw --input waveforms.root --output waveforms.hdf5"
 
 # Test target - run a quick test of the pipeline
 test: $(TARGETS)
 	@echo "Running test pipeline..."
-	@echo "Note: This requires valid input files configured in wave_converter_config.json"
-	@if [ ! -f wave_converter_config.json ]; then \
-		echo "ERROR: wave_converter_config.json not found"; \
+	@echo "Note: This requires a tiny input dataset configured in converter_config.json"
+	@if [ ! -f converter_config.json ]; then \
+		echo "ERROR: converter_config.json not found"; \
 		exit 1; \
 	fi
 	@./run_full_pipeline.sh

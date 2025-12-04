@@ -5,6 +5,7 @@
     "max_cores": 8,
     "chunk_size": 100,
     "temp_dir": "./temp",
+    "nsamples_policy": "pad",
     "waveforms_root": "waveforms.root",
     "waveforms_tree": "Waveforms",
     "analysis_root": "waveforms_analyzed.root",
@@ -19,7 +20,8 @@
     "special_channel_index": 3,
     "tsample_ns": 0.2,
     "pedestal_window": 100,
-    "ped_target": 3500.0
+    "ped_target": 3500.0,
+    "event_policy": "warn"
   },
   "stage2": {
     "analysis_region_min": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],

@@ -1,127 +1,51 @@
 #include <cstdint>
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <vector>
 #include <set>
 #include <fstream>
 #include <regex>
-#include <sys/stat.h>
-#include <sys/types.h>
 
 #include "TFile.h"
 #include "TTree.h"
 
+#include "utils/filesystem_utils.h"
 #include "hdf5.h"
+#include "utils/json_utils.h"
 
 namespace {
 
-// Helper function to create directory recursively
-inline bool CreateDirectoryIfNeeded(const std::string &path) {
-  if (path.empty() || path == ".") {
-    return true;  // Current directory always exists
-  }
-
-  struct stat info;
-  if (stat(path.c_str(), &info) == 0) {
-    if (info.st_mode & S_IFDIR) {
-      return true;  // Directory already exists
-    } else {
-      std::cerr << "ERROR: Path exists but is not a directory: " << path << std::endl;
-      return false;
-    }
-  }
-
-  // Try to create directory
-  // For nested paths, we need to create parent directories first
-  size_t pos = path.find_last_of('/');
-  if (pos != std::string::npos && pos > 0) {
-    std::string parent = path.substr(0, pos);
-    if (!CreateDirectoryIfNeeded(parent)) {
-      return false;
-    }
-  }
-
-  // Create the directory (mkdir with 0755 permissions)
-  if (mkdir(path.c_str(), 0755) != 0) {
-    std::cerr << "ERROR: Failed to create directory: " << path << std::endl;
-    return false;
-  }
-
-  return true;
-}
-
-// Helper function to build path with subdirectory
-inline std::string BuildPath(const std::string &output_dir,
-                             const std::string &subdir,
-                             const std::string &filename) {
-  // If filename is absolute path, use it as-is
-  if (!filename.empty() && filename[0] == '/') {
-    return filename;
-  }
-
-  // If output_dir is empty or ".", just use filename
-  if (output_dir.empty() || output_dir == ".") {
-    return filename;
-  }
-
-  // Build path: output_dir/subdir/filename
-  std::string path = output_dir;
-  if (path.back() != '/') {
-    path += '/';
-  }
-  path += subdir;
-  if (path.back() != '/') {
-    path += '/';
-  }
-  path += filename;
-
-  return path;
-}
-
 // Helper function to extract sensor_ids from analysis config JSON
 inline bool ExtractSensorIds(const std::string &configPath, std::vector<int> &sensorIds) {
-  std::ifstream fin(configPath);
-  if (!fin.is_open()) {
-    std::cerr << "ERROR: cannot open config file: " << configPath << std::endl;
+  simdjson::dom::parser parser;
+  simdjson::dom::element root;
+  std::string err;
+  if (!ParseJsonFile(configPath, parser, root, &err)) {
+    std::cerr << "ERROR: " << err << std::endl;
     return false;
   }
 
-  std::string content((std::istreambuf_iterator<char>(fin)),
-                      std::istreambuf_iterator<char>());
-  fin.close();
+  simdjson::dom::element stage2;
+  if (!GetObject(root, "stage2", stage2)) {
+    std::cerr << "ERROR: stage2 section not found in config" << std::endl;
+    return false;
+  }
 
-  // Extract sensor_mapping block
-  std::string sensorPattern = "\"sensor_mapping\"\\s*:\\s*\\{([^}]*)\\}";
-  std::regex sensorRe(sensorPattern);
-  std::smatch sensorMatch;
-  if (!std::regex_search(content, sensorMatch, sensorRe)) {
+  simdjson::dom::element sensorMapping;
+  if (!GetObject(stage2, "sensor_mapping", sensorMapping)) {
     std::cerr << "ERROR: sensor_mapping not found in config" << std::endl;
     return false;
   }
 
-  std::string sensorContent = sensorMatch[1].str();
-
-  // Extract sensor_ids array
-  std::string arrayPattern = "\"sensor_ids\"\\s*:\\s*\\[([^\\]]*)\\]";
-  std::regex arrayRe(arrayPattern);
-  std::smatch arrayMatch;
-  if (!std::regex_search(sensorContent, arrayMatch, arrayRe)) {
+  sensorIds.clear();
+  if (!GetIntArray(sensorMapping, "sensor_ids", sensorIds) ||
+      sensorIds.empty()) {
     std::cerr << "ERROR: sensor_ids not found in sensor_mapping" << std::endl;
     return false;
   }
 
-  std::string arrayContent = arrayMatch[1].str();
-  sensorIds.clear();
-
-  // Parse integers
-  std::regex numPattern("(-?\\d+)");
-  auto numBegin = std::sregex_iterator(arrayContent.begin(), arrayContent.end(), numPattern);
-  auto numEnd = std::sregex_iterator();
-  for (auto it = numBegin; it != numEnd; ++it) {
-    sensorIds.push_back(std::stoi(it->str()));
-  }
-
-  return !sensorIds.empty();
+  return true;
 }
 
 #pragma pack(push, 1)
@@ -180,6 +104,7 @@ bool ExportRawWaveforms(const std::string &rootFile,
   std::vector<float> *pedestals = nullptr;
   std::vector<uint32_t> *boardIds = nullptr;
   std::vector<uint32_t> *eventCounters = nullptr;
+  std::vector<int> *nsamplesPerChannel = nullptr;
 
   tree->SetBranchAddress("event", &eventIdx);
   tree->SetBranchAddress("nsamples", &nsamples);
@@ -190,6 +115,9 @@ bool ExportRawWaveforms(const std::string &rootFile,
   tree->SetBranchAddress("pedestals", &pedestals);
   tree->SetBranchAddress("board_ids", &boardIds);
   tree->SetBranchAddress("event_counters", &eventCounters);
+  if (tree->GetBranch("nsamples_per_channel")) {
+    tree->SetBranchAddress("nsamples_per_channel", &nsamplesPerChannel);
+  }
 
   const int maxChannels = nChannels;
   std::vector<std::vector<float> *> chPedPtrs(maxChannels, nullptr);
@@ -213,8 +141,12 @@ bool ExportRawWaveforms(const std::string &rootFile,
   std::vector<WaveformMeta> metadata;
   metadata.reserve(static_cast<size_t>(nEntries) * maxChannels);
 
-  std::vector<float> waveforms;
-  waveforms.reserve(static_cast<size_t>(nEntries) * maxChannels * 1024);
+  std::vector<std::vector<float>> waveformRows;
+  waveformRows.reserve(static_cast<size_t>(nEntries) * maxChannels);
+  std::vector<float> rowPadValues;
+  rowPadValues.reserve(static_cast<size_t>(nEntries) * maxChannels);
+  size_t maxSamplesPerRow = 0;
+  bool loggedNsamplesTrim = false;
 
   std::vector<float> timeAxisCopy;
 
@@ -245,16 +177,35 @@ bool ExportRawWaveforms(const std::string &rootFile,
         continue;
       }
 
-      if (static_cast<int>(vecPtr->size()) != nsamples) {
-        std::cerr << "WARNING: nsamples mismatch entry " << entry << " ch" << ch
-                  << " branch size " << vecPtr->size()
-                  << " header " << nsamples << std::endl;
+      int chSamples = nsamples;
+      if (nsamplesPerChannel &&
+          ch < static_cast<int>(nsamplesPerChannel->size())) {
+        chSamples = nsamplesPerChannel->at(ch);
+      }
+
+      chSamples =
+          std::min(chSamples, static_cast<int>(vecPtr->size()));
+      if (timeAxis) {
+        chSamples =
+            std::min(chSamples, static_cast<int>(timeAxis->size()));
+      }
+
+      if (chSamples <= 0) {
+        continue;
+      }
+
+      if (!loggedNsamplesTrim &&
+          chSamples != static_cast<int>(vecPtr->size())) {
+        std::cout << "INFO: trimming waveform samples at entry " << entry
+                  << " ch" << ch << " to " << chSamples
+                  << " for HDF5 export" << std::endl;
+        loggedNsamplesTrim = true;
       }
 
       WaveformMeta meta{};
       meta.event = static_cast<uint32_t>(eventIdx);
       meta.channel = static_cast<uint16_t>(ch);
-      meta.nsamples = static_cast<uint16_t>(vecPtr->size());
+      meta.nsamples = static_cast<uint16_t>(chSamples);
       meta.board_id =
           (ch < static_cast<int>(boardIds->size())) ? (*boardIds)[ch] : 0;
       meta.event_counter =
@@ -265,7 +216,13 @@ bool ExportRawWaveforms(const std::string &rootFile,
           (ch < static_cast<int>(pedestals->size())) ? (*pedestals)[ch] : 0.0f;
 
       metadata.push_back(meta);
-      waveforms.insert(waveforms.end(), vecPtr->begin(), vecPtr->end());
+      maxSamplesPerRow =
+          std::max(maxSamplesPerRow, static_cast<size_t>(chSamples));
+
+      std::vector<float> row(vecPtr->begin(),
+                             vecPtr->begin() + chSamples);
+      waveformRows.push_back(std::move(row));
+      rowPadValues.push_back(pedTarget);
     }
   }
 
@@ -277,11 +234,35 @@ bool ExportRawWaveforms(const std::string &rootFile,
     return false;
   }
 
-  const size_t rows = metadata.size();
-  const size_t samplesPerRow =
-      metadata.front().nsamples > 0 ? metadata.front().nsamples : nsamples;
+  if (maxSamplesPerRow == 0) {
+    std::cerr << "ERROR: no waveform samples found to export" << std::endl;
+    return false;
+  }
 
-  if (rows * samplesPerRow != waveforms.size()) {
+  if (waveformRows.size() != metadata.size()) {
+    std::cerr << "ERROR: internal mismatch between metadata rows and waveforms ("
+              << metadata.size() << " vs " << waveformRows.size() << ")"
+              << std::endl;
+    return false;
+  }
+
+  const size_t rows = metadata.size();
+  const size_t samplesPerRow = maxSamplesPerRow;
+
+  std::vector<float> waveforms;
+  waveforms.reserve(rows * samplesPerRow);
+  for (size_t i = 0; i < waveformRows.size(); ++i) {
+    const auto &row = waveformRows[i];
+    const float padValue =
+        (i < rowPadValues.size()) ? rowPadValues[i] : pedTarget;
+    waveforms.insert(waveforms.end(), row.begin(), row.end());
+    if (row.size() < samplesPerRow) {
+      waveforms.insert(waveforms.end(), samplesPerRow - row.size(),
+                       padValue);
+    }
+  }
+
+  if (waveforms.size() != rows * samplesPerRow) {
     std::cerr << "ERROR: waveform buffer size mismatch (" << waveforms.size()
               << " vs " << rows * samplesPerRow << ")" << std::endl;
     return false;
