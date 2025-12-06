@@ -6,7 +6,9 @@ A three-stage pipeline for converting and analyzing CAEN DT5742 digitizer data.
 
 ```bash
 # 1. Setup ROOT environment
-source /opt/root6/root_install/bin/thisroot.sh # example!
+# Make sure root-config is in PATH; pick the setup for your system
+# macOS (Homebrew): source /opt/homebrew/bin/thisroot.sh
+# Ubuntu/Debian:    source /usr/local/bin/thisroot.sh   (or /usr/share/root/bin/thisroot.sh)
 
 # 2. Build
 make
@@ -21,13 +23,13 @@ make
 ## Pipeline Overview
 
 ```
-Binary/ASCII → [Stage 1] → ROOT → [Stage 2] → ROOT + Features → [Stage 3] → HDF5
-                convert_to_root    analyze_waveforms              export_to_hdf5
+Binary/ASCII → [waveform_converter] → ROOT → [waveform_analyzer] → ROOT + Features → [hdf5_exporter] → HDF5
+                convert_to_root         analyze_waveforms               export_to_hdf5
 ```
 
-**Stage 1**: Converts binary/ASCII waveform files to ROOT with pedestal subtraction
-**Stage 2**: Extracts timing and amplitude features (CFD, leading edge, charge, etc.)
-**Stage 3**: Exports to HDF5 format for Python/NumPy/pandas analysis
+**waveform_converter**: Converts binary/ASCII waveform files to ROOT with pedestal subtraction  
+**waveform_analyzer**: Extracts timing and amplitude features (CFD, leading edge, charge, etc.)  
+**hdf5_exporter**: Exports to HDF5 format for Python/NumPy/pandas analysis
 
 ## Configuration
 
@@ -40,12 +42,12 @@ Edit `converter_config.json`:
     "n_channels": 16,
     "max_cores": 8              // Set > 1 to enable parallel processing
   },
-  "stage1": {
+  "waveform_converter": {
     "input_dir": "../AC_LGAD_TEST/",
     "input_pattern": "wave_%d.dat",
     "input_is_ascii": false
   },
-  "stage2": {
+  "waveform_analyzer": {
     "signal_region_min": [0.0, 0.0, ...],
     "signal_region_max": [190.0, 190.0, ...]
     // ... per-channel analysis settings
@@ -58,15 +60,15 @@ Edit `converter_config.json`:
 ### Run Full Pipeline
 ```bash
 ./run_full_pipeline.sh                # All stages
-./run_full_pipeline.sh --stage1-only  # Convert only
-./run_full_pipeline.sh --stage2-only  # Analyze only
+./run_full_pipeline.sh --stage1-only  # Convert only (waveform_converter)
+./run_full_pipeline.sh --stage2-only  # Analyze only (waveform_analyzer)
 ```
 
 ### Run Individual Stages
 ```bash
-./convert_to_root                     # Stage 1
-./analyze_waveforms                   # Stage 2
-./export_to_hdf5 --mode analysis      # Stage 3
+./convert_to_root                     # waveform_converter
+./analyze_waveforms                   # waveform_analyzer
+./export_to_hdf5 --mode analysis      # hdf5_exporter
 ```
 
 ## Output Files
@@ -95,15 +97,16 @@ print(f"Mean amplitude: {ch0['ampMax'].mean():.3f} V")
 
 ## Requirements
 
-- ROOT 6.x
-- HDF5 library (`brew install hdf5`)
-- simdjson library (`brew install simdjson`)
+- ROOT 6.x (`root-config` available in PATH)
+- HDF5 development libraries (pkg-config `hdf5`; e.g., `sudo apt install libhdf5-dev` on Ubuntu or `brew install hdf5` on macOS)
+- simdjson development libraries (pkg-config `simdjson`; e.g., `sudo apt install libsimdjson-dev` on Ubuntu or `brew install simdjson` on macOS)
 - C++17 compiler
 
 ## Troubleshooting
 
-**ROOT not found**: `source /opt/root6/root_install/bin/thisroot.sh`
-**HDF5 not found**: Edit `HDF5_PREFIX` in `Makefile`
+**ROOT not found**: source the appropriate `thisroot.sh` for your install (see Quick Start)
+**HDF5 not found**: ensure `pkg-config hdf5` works; otherwise set `HDF5_PREFIX` (e.g., `/usr` on Ubuntu or `/opt/homebrew/opt/hdf5` on macOS)
+**simdjson not found**: ensure `pkg-config simdjson` works; otherwise set `JSON_INCLUDES`/`JSON_LIBS` in `Makefile`
 **Input files not found**: Check `input_dir` in `converter_config.json`
 
 ## Documentation

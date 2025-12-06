@@ -27,7 +27,7 @@ struct AnalysisConfig {
   void set_input_tree(const std::string &v) { common.waveforms_tree = v; }
   void set_output_tree(const std::string &v) { common.analysis_tree = v; }
 
-  // Stage2 specific fields
+  // waveform_analyzer specific fields
 
   // Overall analysis region (per channel, in nanoseconds)
   // Points outside this region will be ignored in all analysis
@@ -142,53 +142,53 @@ inline bool LoadAnalysisConfigFromJson(const std::string &path,
     }
   }
 
-  simdjson::dom::element stage2;
-  if (GetObject(root, "stage2", stage2)) {
+  simdjson::dom::element waveformAnalyzer;
+  if (GetObject(root, "waveform_analyzer", waveformAnalyzer)) {
     std::string strValue;
     double numValue = 0.0;
 
-    if (GetNumber(stage2, "rise_time_low", numValue)) {
+    if (GetNumber(waveformAnalyzer, "rise_time_low", numValue)) {
       cfg.rise_time_low = static_cast<float>(numValue);
     }
-    if (GetNumber(stage2, "rise_time_high", numValue)) {
+    if (GetNumber(waveformAnalyzer, "rise_time_high", numValue)) {
       cfg.rise_time_high = static_cast<float>(numValue);
     }
-    if (GetNumber(stage2, "impedance", numValue)) {
+    if (GetNumber(waveformAnalyzer, "impedance", numValue)) {
       cfg.impedance = static_cast<float>(numValue);
     }
-    if (GetNumber(stage2, "snr_threshold", numValue)) {
+    if (GetNumber(waveformAnalyzer, "snr_threshold", numValue)) {
       cfg.snr_threshold = static_cast<float>(numValue);
     }
 
-    GetFloatArray(stage2, "analysis_region_min", cfg.analysis_region_min);
-    GetFloatArray(stage2, "analysis_region_max", cfg.analysis_region_max);
-    GetFloatArray(stage2, "baseline_region_min", cfg.baseline_region_min);
-    GetFloatArray(stage2, "baseline_region_max", cfg.baseline_region_max);
-    GetFloatArray(stage2, "signal_region_min", cfg.signal_region_min);
-    GetFloatArray(stage2, "signal_region_max", cfg.signal_region_max);
-    GetFloatArray(stage2, "charge_region_min", cfg.charge_region_min);
-    GetFloatArray(stage2, "charge_region_max", cfg.charge_region_max);
-    GetFloatArray(stage2, "cut_amp_max", cfg.cut_amp_max);
-    GetFloatArray(stage2, "le_thresholds", cfg.le_thresholds);
+    GetFloatArray(waveformAnalyzer, "analysis_region_min", cfg.analysis_region_min);
+    GetFloatArray(waveformAnalyzer, "analysis_region_max", cfg.analysis_region_max);
+    GetFloatArray(waveformAnalyzer, "baseline_region_min", cfg.baseline_region_min);
+    GetFloatArray(waveformAnalyzer, "baseline_region_max", cfg.baseline_region_max);
+    GetFloatArray(waveformAnalyzer, "signal_region_min", cfg.signal_region_min);
+    GetFloatArray(waveformAnalyzer, "signal_region_max", cfg.signal_region_max);
+    GetFloatArray(waveformAnalyzer, "charge_region_min", cfg.charge_region_min);
+    GetFloatArray(waveformAnalyzer, "charge_region_max", cfg.charge_region_max);
+    GetFloatArray(waveformAnalyzer, "cut_amp_max", cfg.cut_amp_max);
+    GetFloatArray(waveformAnalyzer, "le_thresholds", cfg.le_thresholds);
 
-    GetIntArray(stage2, "cfd_thresholds", cfg.cfd_thresholds);
-    GetIntArray(stage2, "charge_thresholds", cfg.charge_thresholds);
-    GetIntArray(stage2, "signal_polarity", cfg.signal_polarity);
+    GetIntArray(waveformAnalyzer, "cfd_thresholds", cfg.cfd_thresholds);
+    GetIntArray(waveformAnalyzer, "charge_thresholds", cfg.charge_thresholds);
+    GetIntArray(waveformAnalyzer, "signal_polarity", cfg.signal_polarity);
 
     bool boolValue = false;
-    if (GetBool(stage2, "waveform_plots_enabled", boolValue)) {
+    if (GetBool(waveformAnalyzer, "waveform_plots_enabled", boolValue)) {
       cfg.waveform_plots_enabled = boolValue;
     }
-    if (GetBool(stage2, "waveform_plots_only_signal", boolValue)) {
+    if (GetBool(waveformAnalyzer, "waveform_plots_only_signal", boolValue)) {
       cfg.waveform_plots_only_signal = boolValue;
     }
 
-    if (GetString(stage2, "waveform_plots_dir", strValue)) {
+    if (GetString(waveformAnalyzer, "waveform_plots_dir", strValue)) {
       cfg.waveform_plots_dir = strValue;
     }
 
     simdjson::dom::element sensorSection;
-    if (GetObject(stage2, "sensor_mapping", sensorSection)) {
+    if (GetObject(waveformAnalyzer, "sensor_mapping", sensorSection)) {
       GetIntArray(sensorSection, "sensor_ids", cfg.sensor_ids);
       GetIntArray(sensorSection, "strip_ids", cfg.strip_ids);
     }

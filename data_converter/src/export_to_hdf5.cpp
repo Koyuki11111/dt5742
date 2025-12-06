@@ -16,8 +16,12 @@
 
 namespace {
 
-// Helper function to extract sensor_ids from analysis config JSON
-inline bool ExtractSensorIds(const std::string &configPath, std::vector<int> &sensorIds) {
+// Helper function to extract sensor mapping (sensor_ids, column_ids, strip_ids) from analysis config JSON
+inline bool ExtractSensorIds(const std::string &configPath,
+                             std::vector<int> &sensorIds,
+                             std::vector<int> *columnIds = nullptr,
+                             std::vector<int> *stripIds = nullptr,
+                             int defaultColumn = 1) {
   simdjson::dom::parser parser;
   simdjson::dom::element root;
   std::string err;
@@ -26,14 +30,14 @@ inline bool ExtractSensorIds(const std::string &configPath, std::vector<int> &se
     return false;
   }
 
-  simdjson::dom::element stage2;
-  if (!GetObject(root, "stage2", stage2)) {
-    std::cerr << "ERROR: stage2 section not found in config" << std::endl;
+  simdjson::dom::element waveformAnalyzer;
+  if (!GetObject(root, "waveform_analyzer", waveformAnalyzer)) {
+    std::cerr << "ERROR: waveform_analyzer section not found in config" << std::endl;
     return false;
   }
 
   simdjson::dom::element sensorMapping;
-  if (!GetObject(stage2, "sensor_mapping", sensorMapping)) {
+  if (!GetObject(waveformAnalyzer, "sensor_mapping", sensorMapping)) {
     std::cerr << "ERROR: sensor_mapping not found in config" << std::endl;
     return false;
   }
@@ -43,6 +47,27 @@ inline bool ExtractSensorIds(const std::string &configPath, std::vector<int> &se
       sensorIds.empty()) {
     std::cerr << "ERROR: sensor_ids not found in sensor_mapping" << std::endl;
     return false;
+  }
+
+  if (columnIds) {
+    columnIds->clear();
+    if (!GetIntArray(sensorMapping, "column_ids", *columnIds) ||
+        columnIds->empty()) {
+      // If not provided, fill with defaultColumn
+      columnIds->assign(sensorIds.size(), defaultColumn);
+    }
+  }
+
+  if (stripIds) {
+    stripIds->clear();
+    if (!GetIntArray(sensorMapping, "strip_ids", *stripIds) ||
+        stripIds->empty()) {
+      // If not provided, fill with channel index (0, 1, 2, ...)
+      stripIds->resize(sensorIds.size());
+      for (size_t i = 0; i < sensorIds.size(); ++i) {
+        (*stripIds)[i] = static_cast<int>(i);
+      }
+    }
   }
 
   return true;
@@ -377,7 +402,8 @@ bool ExportAnalysisFeatures(const std::string &rootFile,
                             const std::string &hdf5File,
                             int nChannels,
                             int sensorFilter = -1,
-                            const std::vector<int> *sensorIds = nullptr) {
+                            const std::vector<int> *sensorIds = nullptr,
+                            bool append = false) {
   TFile *fin = TFile::Open(rootFile.c_str(), "READ");
   if (!fin || fin->IsZombie()) {
     std::cerr << "ERROR: cannot open ROOT file " << rootFile << std::endl;
@@ -468,8 +494,16 @@ bool ExportAnalysisFeatures(const std::string &rootFile,
     return false;
   }
 
-  hid_t file =
-      H5Fcreate(hdf5File.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+  hid_t file = -1;
+  if (append) {
+    file = H5Fopen(hdf5File.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+    if (file < 0) {
+      std::cerr << "ERROR: cannot open HDF5 file for appending " << hdf5File << std::endl;
+      return false;
+    }
+  } else {
+    file = H5Fcreate(hdf5File.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+  }
   if (file < 0) {
     std::cerr << "ERROR: cannot create HDF5 file " << hdf5File << std::endl;
     return false;
@@ -514,11 +548,155 @@ bool ExportAnalysisFeatures(const std::string &rootFile,
   return true;
 }
 
+bool ExportCorryHits(const std::string &rootFile,
+                     const std::string &treeName,
+                     const std::string &hdf5File,
+                     int nChannels,
+                     int sensorFilter = -1,
+                     const std::vector<int> *sensorIds = nullptr,
+                     const std::vector<int> *columnIds = nullptr,
+                     const std::vector<int> *stripIds = nullptr,
+                     int defaultColumn = 1,
+                     bool onlyCorryFields = true) {
+  TFile *fin = TFile::Open(rootFile.c_str(), "READ");
+  if (!fin || fin->IsZombie()) {
+    std::cerr << "ERROR: cannot open ROOT file " << rootFile << std::endl;
+    return false;
+  }
+
+  TTree *tree = dynamic_cast<TTree *>(fin->Get(treeName.c_str()));
+  if (!tree) {
+    std::cerr << "ERROR: tree " << treeName << " not found" << std::endl;
+    fin->Close();
+    return false;
+  }
+
+  int event = 0;
+  std::vector<float> *charge = nullptr;
+  std::vector<float> *peakTime = nullptr;
+
+  tree->SetBranchAddress("event", &event);
+  tree->SetBranchAddress("charge", &charge);
+  tree->SetBranchAddress("peakTime", &peakTime);
+
+  const Long64_t nEntries = tree->GetEntries();
+  if (nEntries <= 0) {
+    std::cerr << "WARNING: tree contains no entries" << std::endl;
+    fin->Close();
+    return false;
+  }
+
+  #pragma pack(push, 1)
+  struct HitRow {
+    uint16_t column;
+    uint16_t row;
+    uint8_t raw;
+    double charge;
+    double timestamp;
+    uint32_t trigger_number;
+  };
+  #pragma pack(pop)
+
+  std::vector<HitRow> hits;
+  hits.reserve(static_cast<size_t>(nEntries) * nChannels);
+
+  for (Long64_t entry = 0; entry < nEntries; ++entry) {
+    tree->GetEntry(entry);
+
+    for (int ch = 0; ch < nChannels; ++ch) {
+      if (sensorFilter >= 0 && sensorIds && ch < static_cast<int>(sensorIds->size())) {
+        if ((*sensorIds)[ch] != sensorFilter) {
+          continue;
+        }
+      }
+
+      HitRow hit{};
+      // Column: default or per-channel mapping if provided
+      if (columnIds && ch < static_cast<int>(columnIds->size())) {
+        hit.column = static_cast<uint16_t>((*columnIds)[ch]);
+      } else {
+        hit.column = static_cast<uint16_t>(defaultColumn);
+      }
+      // Row: use strip_ids if available, otherwise use channel index
+      if (stripIds && ch < static_cast<int>(stripIds->size())) {
+        hit.row = static_cast<uint16_t>((*stripIds)[ch]);
+      } else {
+        hit.row = static_cast<uint16_t>(ch);
+      }
+      hit.raw = 0u;
+      hit.charge =
+          (charge && ch < static_cast<int>(charge->size())) ? static_cast<double>((*charge)[ch]) : 0.0;
+      hit.timestamp =
+          (peakTime && ch < static_cast<int>(peakTime->size())) ? static_cast<double>((*peakTime)[ch]) : 0.0;
+      hit.trigger_number = static_cast<uint32_t>(event);
+
+      hits.push_back(hit);
+    }
+  }
+
+  fin->Close();
+
+  if (hits.empty()) {
+    std::cerr << "WARNING: no hits extracted for Corryvreckan format" << std::endl;
+    return false;
+  }
+
+  hid_t file =
+      H5Fcreate(hdf5File.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+  if (file < 0) {
+    std::cerr << "ERROR: cannot create HDF5 file " << hdf5File << std::endl;
+    return false;
+  }
+
+  hsize_t dim = hits.size();
+  hid_t space = H5Screate_simple(1, &dim, nullptr);
+
+  hid_t type = H5Tcreate(H5T_COMPOUND, sizeof(HitRow));
+  H5Tinsert(type, "column", HOFFSET(HitRow, column), H5T_NATIVE_UINT16);
+  H5Tinsert(type, "row", HOFFSET(HitRow, row), H5T_NATIVE_UINT16);
+  H5Tinsert(type, "raw", HOFFSET(HitRow, raw), H5T_NATIVE_UINT8);
+  H5Tinsert(type, "charge", HOFFSET(HitRow, charge), H5T_NATIVE_DOUBLE);
+  H5Tinsert(type, "timestamp", HOFFSET(HitRow, timestamp), H5T_NATIVE_DOUBLE);
+  H5Tinsert(type, "trigger_number", HOFFSET(HitRow, trigger_number), H5T_NATIVE_UINT32);
+
+  hid_t dset = H5Dcreate(file, "Hits", type, space,
+                        H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+  if (dset < 0) {
+    std::cerr << "ERROR: cannot create Hits dataset" << std::endl;
+    H5Tclose(type);
+    H5Sclose(space);
+    H5Fclose(file);
+    return false;
+  }
+
+  H5Dwrite(dset, type, H5S_ALL, H5S_ALL, H5P_DEFAULT, hits.data());
+
+  // Mark whether only Corryvreckan fields are stored
+  hid_t attrSpace = H5Screate(H5S_SCALAR);
+  if (attrSpace >= 0) {
+    unsigned char flag = onlyCorryFields ? 1 : 0;
+    hid_t attr = H5Acreate2(file, "corry_only_fields", H5T_NATIVE_UCHAR, attrSpace, H5P_DEFAULT, H5P_DEFAULT);
+    if (attr >= 0) {
+      H5Awrite(attr, H5T_NATIVE_UCHAR, &flag);
+      H5Aclose(attr);
+    }
+    H5Sclose(attrSpace);
+  }
+
+  H5Dclose(dset);
+  H5Tclose(type);
+  H5Sclose(space);
+  H5Fclose(file);
+
+  std::cout << "HDF5 Corryvreckan Hits written to " << hdf5File << std::endl;
+  return true;
+}
+
 void PrintUsage(const char *prog) {
   std::cout << "Export ROOT data to HDF5 format\n"
             << "Usage: " << prog << " [options]\n"
             << "Options:\n"
-            << "  --mode MODE         Export mode: 'raw' or 'analysis' (required)\n"
+            << "  --mode MODE         Export mode: 'raw', 'analysis', or 'corry' (required)\n"
             << "  --input FILE        Input ROOT file (required)\n"
             << "  --tree NAME         Input tree name (required)\n"
             << "  --output FILE       Output HDF5 file (required)\n"
@@ -526,6 +704,9 @@ void PrintUsage(const char *prog) {
             << "  --output-dir DIR    Output directory (default: 'output')\n"
             << "  --sensor-id ID      Export only channels from this sensor ID\n"
             << "  --sensor-mapping FILE  Load sensor mapping from analysis config JSON\n"
+            << "  --use-sensor-mapping BOOL  Enable/disable applying mapping (default: true)\n"
+            << "  --corry-only-fields BOOL   If true, store only fields used by Corryvreckan (default: true)\n"
+            << "  --column-id ID      Default column value for corry mode (default: 1)\n"
             << "  -h, --help          Show this help message\n"
             << "\n"
             << "Note: If output-dir is specified, files will be organized:\n"
@@ -546,9 +727,14 @@ int main(int argc, char **argv) {
   std::string outputHdf5;
   std::string outputDir = "output";  // Default output directory
   std::string sensorMappingFile;
+  bool useSensorMapping = true;
+  bool corryOnlyFields = true;
   int nChannels = 16;
   int sensorFilter = -1;  // -1 means no filtering
+  int defaultColumnId = 1;
   std::vector<int> sensorIds;
+  std::vector<int> columnIds;
+  std::vector<int> stripIds;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -613,6 +799,47 @@ int main(int argc, char **argv) {
         return 1;
       }
       sensorMappingFile = argv[++i];
+    } else if (arg == "--column-id") {
+      if (i + 1 >= argc) {
+        std::cerr << "ERROR: --column-id requires a value" << std::endl;
+        return 1;
+      }
+      try {
+        defaultColumnId = std::stoi(argv[++i]);
+      } catch (...) {
+        std::cerr << "ERROR: invalid number for --column-id" << std::endl;
+        return 1;
+      }
+    } else if (arg == "--use-sensor-mapping") {
+      if (i + 1 >= argc) {
+        std::cerr << "ERROR: --use-sensor-mapping requires a value (true/false)" << std::endl;
+        return 1;
+      }
+      std::string val = argv[++i];
+      std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+      if (val == "true" || val == "1" || val == "yes") {
+        useSensorMapping = true;
+      } else if (val == "false" || val == "0" || val == "no") {
+        useSensorMapping = false;
+      } else {
+        std::cerr << "ERROR: invalid value for --use-sensor-mapping (use true/false)" << std::endl;
+        return 1;
+      }
+    } else if (arg == "--corry-only-fields") {
+      if (i + 1 >= argc) {
+        std::cerr << "ERROR: --corry-only-fields requires a value (true/false)" << std::endl;
+        return 1;
+      }
+      std::string val = argv[++i];
+      std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+      if (val == "true" || val == "1" || val == "yes") {
+        corryOnlyFields = true;
+      } else if (val == "false" || val == "0" || val == "no") {
+        corryOnlyFields = false;
+      } else {
+        std::cerr << "ERROR: invalid value for --corry-only-fields (use true/false)" << std::endl;
+        return 1;
+      }
     } else {
       std::cerr << "ERROR: unknown option " << arg << std::endl;
       PrintUsage(argv[0]);
@@ -628,17 +855,34 @@ int main(int argc, char **argv) {
 
   // Load sensor mapping if requested
   const std::vector<int> *sensorIdsPtr = nullptr;
+  const std::vector<int> *columnIdsPtr = nullptr;
+  const std::vector<int> *stripIdsPtr = nullptr;
   if (sensorFilter >= 0) {
+    if (!useSensorMapping) {
+      std::cerr << "ERROR: --sensor-id requires mapping, but --use-sensor-mapping=false" << std::endl;
+      return 1;
+    }
     if (sensorMappingFile.empty()) {
       std::cerr << "ERROR: --sensor-id requires --sensor-mapping" << std::endl;
       return 1;
     }
-    if (!ExtractSensorIds(sensorMappingFile, sensorIds)) {
+    if (!ExtractSensorIds(sensorMappingFile, sensorIds, &columnIds, &stripIds, defaultColumnId)) {
       std::cerr << "ERROR: failed to load sensor IDs from " << sensorMappingFile << std::endl;
       return 1;
     }
     sensorIdsPtr = &sensorIds;
+    columnIdsPtr = &columnIds;
+    stripIdsPtr = &stripIds;
     std::cout << "Filtering for sensor ID " << sensorFilter << std::endl;
+  } else if (!sensorMappingFile.empty() && useSensorMapping) {
+    // Allow mapping without filtering
+    if (!ExtractSensorIds(sensorMappingFile, sensorIds, &columnIds, &stripIds, defaultColumnId)) {
+      std::cerr << "ERROR: failed to load sensor IDs from " << sensorMappingFile << std::endl;
+      return 1;
+    }
+    sensorIdsPtr = &sensorIds;
+    columnIdsPtr = &columnIds;
+    stripIdsPtr = &stripIds;
   }
 
   // Build full paths with directory structure
@@ -661,8 +905,28 @@ int main(int argc, char **argv) {
       ok = ExportRawWaveforms(inputPath, treeName, outputPath, nChannels, sensorFilter, sensorIdsPtr);
     } else if (mode == "analysis") {
       ok = ExportAnalysisFeatures(inputPath, treeName, outputPath, nChannels, sensorFilter, sensorIdsPtr);
+    } else if (mode == "corry") {
+      ok = ExportCorryHits(inputPath,
+                           treeName,
+                           outputPath,
+                           nChannels,
+                           sensorFilter,
+                           sensorIdsPtr,
+                           columnIdsPtr,
+                           stripIdsPtr,
+                           defaultColumnId,
+                           corryOnlyFields);
+      if (ok && !corryOnlyFields) {
+        // Append analysis features for richer files if requested
+        bool appended = ExportAnalysisFeatures(
+            inputPath, treeName, outputPath, nChannels, sensorFilter, sensorIdsPtr, true /*append*/);
+        if (!appended) {
+          std::cerr << "ERROR: failed to append AnalysisFeatures dataset" << std::endl;
+          return 1;
+        }
+      }
     } else {
-      std::cerr << "ERROR: unknown mode '" << mode << "'. Use 'raw' or 'analysis'" << std::endl;
+      std::cerr << "ERROR: unknown mode '" << mode << "'. Use 'raw', 'analysis', or 'corry'" << std::endl;
       return 1;
     }
 

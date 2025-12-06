@@ -5,6 +5,9 @@
 
 set -e
 
+# Resolve script directory so we can find binaries regardless of caller cwd
+SCRIPT_DIR="$(cd -- "$(dirname "$0")" && pwd)"
+
 # Default values (can be overridden by config or command line)
 DEFAULT_CONFIG="converter_config.json"
 DEFAULT_CHUNK_SIZE=100
@@ -90,8 +93,10 @@ if [ ! -f "$CONFIG" ]; then
     exit 1
 fi
 
-if [ ! -f "./analyze_waveforms" ]; then
-    echo "ERROR: analyze_waveforms executable not found"
+ANALYZE_BIN="${SCRIPT_DIR}/analyze_waveforms"
+
+if [ ! -x "$ANALYZE_BIN" ]; then
+    echo "ERROR: analyze_waveforms executable not found at $ANALYZE_BIN"
     echo "Please run 'make' to build the executables"
     exit 1
 fi
@@ -102,7 +107,7 @@ import json, sys
 try:
     with open('$CONFIG') as f:
         config = json.load(f)
-        print(config.get('output_dir', 'output'))
+        print(config.get('common', {}).get('output_dir', 'output'))
 except Exception:
     print('output')
 " 2>/dev/null)
@@ -187,19 +192,33 @@ process_chunk() {
     local END_EVENT=$3
 
     local CHUNK_OUTPUT="$TEMP_DIR/chunk_${CHUNK_ID}.root"
+    local CHUNK_PLOTS="waveform_plots_chunk_${CHUNK_ID}"
 
     echo "  Chunk $CHUNK_ID: events [$START_EVENT, $END_EVENT)"
 
-    ./analyze_waveforms \
+    "$ANALYZE_BIN" \
         --config "$CONFIG" \
         --input "$INPUT_ROOT" \
         --output "$(basename $CHUNK_OUTPUT)" \
         --event-range "$START_EVENT:$END_EVENT" \
+        --waveform-plots-file "$CHUNK_PLOTS" \
         > "$TEMP_DIR/chunk_${CHUNK_ID}.log" 2>&1
 
     # Move output to temp directory
     if [ -f "$OUTPUT_DIR/root/$(basename $CHUNK_OUTPUT)" ]; then
         mv "$OUTPUT_DIR/root/$(basename $CHUNK_OUTPUT)" "$CHUNK_OUTPUT"
+    fi
+
+    # Move waveform plots to temp directory if it exists
+    if [ -f "$OUTPUT_DIR/waveform_plots/${CHUNK_PLOTS}.root" ]; then
+        mv "$OUTPUT_DIR/waveform_plots/${CHUNK_PLOTS}.root" "$TEMP_DIR/${CHUNK_PLOTS}.root"
+    fi
+
+    # Move quality check files to temp directory if they exist
+    # Quality check files follow the same naming scheme as waveform plots
+    local CHUNK_QC=$(echo "$CHUNK_PLOTS" | sed 's/waveform_plots/quality_check/')
+    if [ -f "$OUTPUT_DIR/quality_check/${CHUNK_QC}.root" ]; then
+        mv "$OUTPUT_DIR/quality_check/${CHUNK_QC}.root" "$TEMP_DIR/${CHUNK_QC}.root"
     fi
 
     if [ $? -eq 0 ]; then
@@ -270,7 +289,7 @@ if [ $MISSING_CHUNKS -gt 0 ]; then
     exit 1
 fi
 
-# Use hadd to merge ROOT files
+# Use hadd to merge analysis ROOT files
 OUTPUT_PATH="$OUTPUT_DIR/root/$OUTPUT_ROOT"
 hadd -f "$OUTPUT_PATH" "$TEMP_DIR"/chunk_*.root > "$TEMP_DIR/merge.log" 2>&1
 
@@ -279,7 +298,67 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-echo "Merged $NUM_CHUNKS chunks into $OUTPUT_PATH"
+echo "Merged $NUM_CHUNKS analysis chunks into $OUTPUT_PATH"
+echo ""
+
+# Merge waveform plots if they exist
+PLOTS_FILES=("$TEMP_DIR"/waveform_plots_chunk_*.root)
+if [ -f "${PLOTS_FILES[0]}" ]; then
+    echo "Merging waveform plots files..."
+
+    PLOTS_OUTPUT="$OUTPUT_DIR/waveform_plots/waveform_plots.root"
+
+    # Ensure output directory exists
+    mkdir -p "$OUTPUT_DIR/waveform_plots"
+
+    hadd -f "$PLOTS_OUTPUT" "$TEMP_DIR"/waveform_plots_chunk_*.root > "$TEMP_DIR/merge_plots.log" 2>&1
+
+    if [ $? -eq 0 ]; then
+        echo "Merged waveform plots into $PLOTS_OUTPUT"
+
+        # Get file size and report
+        PLOTS_SIZE=$(ls -lh "$PLOTS_OUTPUT" | awk '{print $5}')
+        echo "  Waveform plots file size: $PLOTS_SIZE"
+
+        # Check if file is larger than 4GB (warning for manual split if needed)
+        PLOTS_SIZE_BYTES=$(stat -f%z "$PLOTS_OUTPUT" 2>/dev/null || stat -c%s "$PLOTS_OUTPUT" 2>/dev/null)
+        FOUR_GB=$((4 * 1024 * 1024 * 1024))
+        if [ "$PLOTS_SIZE_BYTES" -gt "$FOUR_GB" ]; then
+            echo "  WARNING: Waveform plots file exceeds 4GB. Consider processing smaller chunks."
+            echo "           Large files may be difficult to transfer or open."
+        fi
+    else
+        echo "WARNING: Failed to merge waveform plots (see $TEMP_DIR/merge_plots.log)"
+    fi
+else
+    echo "No waveform plots files found (plots may be disabled in config)"
+fi
+echo ""
+
+# Merge quality check files if they exist
+QC_FILES=("$TEMP_DIR"/quality_check_chunk_*.root)
+if [ -f "${QC_FILES[0]}" ]; then
+    echo "Merging quality check files..."
+
+    QC_OUTPUT="$OUTPUT_DIR/quality_check/quality_check.root"
+
+    # Ensure output directory exists
+    mkdir -p "$OUTPUT_DIR/quality_check"
+
+    hadd -f "$QC_OUTPUT" "$TEMP_DIR"/quality_check_chunk_*.root > "$TEMP_DIR/merge_qc.log" 2>&1
+
+    if [ $? -eq 0 ]; then
+        echo "Merged quality check files into $QC_OUTPUT"
+
+        # Get file size and report
+        QC_SIZE=$(ls -lh "$QC_OUTPUT" | awk '{print $5}')
+        echo "  Quality check file size: $QC_SIZE"
+    else
+        echo "WARNING: Failed to merge quality check files (see $TEMP_DIR/merge_qc.log)"
+    fi
+else
+    echo "No quality check files found (may be disabled in config)"
+fi
 echo ""
 
 # Clean up temporary files (optional)

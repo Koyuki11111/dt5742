@@ -24,7 +24,7 @@ struct WaveConverterConfig {
   void set_chunk_size(int v) { common.chunk_size = v; }
   void set_root_file(const std::string &v) { common.waveforms_root = v; }
   void set_tree_name(const std::string &v) { common.waveforms_tree = v; }
-  // Stage1 specific fields
+  // waveform_converter specific fields
   std::string input_pattern = "wave_%d.dat";
   std::string input_dir = ".";
   bool input_is_ascii = false;
@@ -77,40 +77,40 @@ inline bool LoadConfigFromJson(const std::string &path,
     }
   }
 
-  simdjson::dom::element stage1;
-  if (GetObject(root, "stage1", stage1)) {
+  simdjson::dom::element waveformConverter;
+  if (GetObject(root, "waveform_converter", waveformConverter)) {
     std::string strValue;
     double numValue = 0.0;
     bool boolValue = false;
 
-    if (GetString(stage1, "input_pattern", strValue)) {
+    if (GetString(waveformConverter, "input_pattern", strValue)) {
       cfg.input_pattern = strValue;
     }
-    if (GetString(stage1, "input_dir", strValue)) {
+    if (GetString(waveformConverter, "input_dir", strValue)) {
       cfg.input_dir = strValue;
     }
-    if (GetBool(stage1, "input_is_ascii", boolValue)) {
+    if (GetBool(waveformConverter, "input_is_ascii", boolValue)) {
       cfg.input_is_ascii = boolValue;
     }
-    if (GetString(stage1, "special_channel_file", strValue)) {
+    if (GetString(waveformConverter, "special_channel_file", strValue)) {
       cfg.special_channel_file = strValue;
     }
-    if (GetBool(stage1, "enable_special_override", boolValue)) {
+    if (GetBool(waveformConverter, "enable_special_override", boolValue)) {
       cfg.enable_special_override = boolValue;
     }
-    if (GetNumber(stage1, "special_channel_index", numValue)) {
+    if (GetNumber(waveformConverter, "special_channel_index", numValue)) {
       cfg.special_channel_index = static_cast<int>(numValue);
     }
-    if (GetString(stage1, "event_policy", strValue)) {
+    if (GetString(waveformConverter, "event_policy", strValue)) {
       cfg.event_policy = strValue;
     }
-    if (GetNumber(stage1, "tsample_ns", numValue)) {
+    if (GetNumber(waveformConverter, "tsample_ns", numValue)) {
       cfg.tsample_ns = numValue;
     }
-    if (GetNumber(stage1, "pedestal_window", numValue)) {
+    if (GetNumber(waveformConverter, "pedestal_window", numValue)) {
       cfg.pedestal_window = static_cast<int>(numValue);
     }
-    if (GetNumber(stage1, "ped_target", numValue)) {
+    if (GetNumber(waveformConverter, "ped_target", numValue)) {
       cfg.ped_target = numValue;
     }
   }

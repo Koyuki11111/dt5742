@@ -3,17 +3,35 @@
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -O2
 SRCDIR = src
-INCLUDES = -Iinclude -I. -I/opt/homebrew/include
-JSON_LIBS = -L/opt/homebrew/lib -lsimdjson
+UNAME_S := $(shell uname -s)
+
+# Base include paths
+BASE_INCLUDES = -Iinclude -I.
+
+# simdjson configuration (prefer pkg-config, fallback to macOS Homebrew defaults)
+JSON_LIBS ?= $(shell pkg-config --libs simdjson 2>/dev/null)
+JSON_INCLUDES ?= $(shell pkg-config --cflags simdjson 2>/dev/null)
+ifeq ($(JSON_LIBS),)
+	JSON_INCLUDES ?= -I/opt/homebrew/include
+	JSON_LIBS ?= -L/opt/homebrew/lib -lsimdjson
+endif
+INCLUDES = $(BASE_INCLUDES) $(JSON_INCLUDES)
 
 # ROOT configuration
 ROOT_CFLAGS = $(shell root-config --cflags)
 ROOT_LIBS = $(shell root-config --libs)
 
 # HDF5 configuration
-HDF5_PREFIX = /opt/homebrew/opt/hdf5
-HDF5_CFLAGS = -I$(HDF5_PREFIX)/include
-HDF5_LIBS = -L$(HDF5_PREFIX)/lib -lhdf5
+HDF5_LIBS ?= $(shell pkg-config --libs hdf5 2>/dev/null)
+HDF5_CFLAGS ?= $(shell pkg-config --cflags hdf5 2>/dev/null)
+ifeq ($(HDF5_LIBS),)
+	HDF5_PREFIX ?= /opt/homebrew/opt/hdf5
+	ifeq ($(UNAME_S),Linux)
+		HDF5_PREFIX ?= /usr
+	endif
+	HDF5_CFLAGS = -I$(HDF5_PREFIX)/include
+	HDF5_LIBS = -L$(HDF5_PREFIX)/lib -lhdf5
+endif
 
 # Targets
 TARGETS = convert_to_root analyze_waveforms export_to_hdf5
@@ -71,7 +89,8 @@ help:
 	@echo ""
 	@echo "Prerequisites:"
 	@echo "  - ROOT 6.x:   source /opt/root6/root_install/bin/thisroot.sh"
-	@echo "  - HDF5:       Installed at $(HDF5_PREFIX)"
+	@echo "  - HDF5:       pkg-config hdf5 or set HDF5_PREFIX (/usr or /opt/homebrew/opt/hdf5)"
+	@echo "  - simdjson:   pkg-config simdjson or set JSON_INCLUDES/JSON_LIBS"
 	@echo "  - C++17 compiler"
 	@echo ""
 	@echo "Individual stages:"

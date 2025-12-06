@@ -1,17 +1,19 @@
 #!/bin/bash
 
 # Full waveform processing pipeline
-# Stage 1: Convert binary/ASCII to ROOT
-# Stage 2: Analyze waveforms
-# Stage 3: Export to HDF5
+# Stage 1 (waveform_converter): Convert binary/ASCII to ROOT
+# Stage 2 (waveform_analyzer): Analyze waveforms
+# Stage 3 (hdf5_exporter): Export to HDF5
 
 set -e  # Exit on error
 
-# Default configuration file (unified)
-PIPELINE_CONFIG="converter_config.json"
+# Resolve script directory so we can find configs/binaries when invoked elsewhere
+SCRIPT_DIR="$(cd -- "$(dirname "$0")" && pwd)"
 
-# Output directory is read from JSON configs (default: "output")
-# Edit converter_config.json (common.output_dir) to change output_dir
+# Default configuration file (unified)
+PIPELINE_CONFIG="${SCRIPT_DIR}/converter_config.json"
+
+# Output directory will be loaded from config (common.output_dir)
 OUTPUT_DIR="output"
 
 # Default intermediate/output files (relative names). For a minimal smoke test,
@@ -39,12 +41,12 @@ Options:
     --raw-root FILE          Raw ROOT filename (default: waveforms.root)
     --analysis-root FILE     Analysis ROOT filename (default: waveforms_analyzed.root)
     --analysis-hdf5 FILE     Analysis HDF5 filename (default: waveforms_analyzed.h5)
-    --stage1-only            Run only stage 1 (convert to ROOT)
-    --stage2-only            Run only stage 2 (analysis)
-    --stage3-only            Run only stage 3 (export to HDF5)
-    --skip-stage1            Skip stage 1
-    --skip-stage2            Skip stage 2
-    --skip-stage3            Skip stage 3
+    --stage1-only            Run only stage 1 (waveform_converter)
+    --stage2-only            Run only stage 2 (waveform_analyzer)
+    --stage3-only            Run only stage 3 (hdf5_exporter)
+    --skip-stage1            Skip stage 1 (waveform_converter)
+    --skip-stage2            Skip stage 2 (waveform_analyzer)
+    --skip-stage3            Skip stage 3 (hdf5_exporter)
     --parallel               Force parallel processing (overrides config auto-detection)
     --verbose                Verbose output
     -h, --help               Show this help message
@@ -56,9 +58,9 @@ Parallel Processing:
     Use --parallel to force parallel mode regardless of config settings.
 
 Stages:
-    Stage 1: convert_to_root     - Convert binary/ASCII waveforms to ROOT format
-    Stage 2: analyze_waveforms   - Extract timing and amplitude features
-    Stage 3: export_to_hdf5      - Export analyzed ROOT data to HDF5 format
+    Stage 1: waveform_converter (convert_to_root)   - Convert binary/ASCII waveforms to ROOT format
+    Stage 2: waveform_analyzer (analyze_waveforms)  - Extract timing and amplitude features
+    Stage 3: hdf5_exporter (export_to_hdf5)         - Export analyzed ROOT data to HDF5 format
 
 Output Organization:
     All outputs are organized in subdirectories (default: output/):
@@ -160,6 +162,54 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Normalize PIPELINE_CONFIG to an absolute path.
+# Prefer the user’s working directory; if not found, fall back to the script directory.
+if [[ "$PIPELINE_CONFIG" != /* ]]; then
+    CWD_CONFIG="$(cd -- "$(dirname "$PIPELINE_CONFIG")" && pwd)/$(basename "$PIPELINE_CONFIG")"
+    SCRIPT_CONFIG="$(cd -- "$SCRIPT_DIR" && cd -- "$(dirname "$PIPELINE_CONFIG")" && pwd)/$(basename "$PIPELINE_CONFIG")"
+
+    if [ -f "$CWD_CONFIG" ]; then
+        PIPELINE_CONFIG="$CWD_CONFIG"
+    elif [ -f "$SCRIPT_CONFIG" ]; then
+        PIPELINE_CONFIG="$SCRIPT_CONFIG"
+    else
+        PIPELINE_CONFIG="$CWD_CONFIG"
+    fi
+fi
+
+# Ensure the config file exists before continuing
+if [ ! -f "$PIPELINE_CONFIG" ]; then
+    echo "ERROR: Pipeline configuration file '$PIPELINE_CONFIG' not found"
+    exit 1
+fi
+
+# Require python3 for config parsing
+if ! command -v python3 &> /dev/null; then
+    echo "ERROR: python3 not found. Required for config parsing"
+    exit 1
+fi
+
+# Load output_dir from config if present
+if [ -f "$PIPELINE_CONFIG" ]; then
+    RAW_OUTPUT_DIR=$(python3 - "$PIPELINE_CONFIG" <<'EOF'
+import json, sys
+cfg_path = sys.argv[1]
+try:
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+    print(cfg.get("common", {}).get("output_dir", "output"))
+except Exception:
+    print("output")
+EOF
+)
+    CONFIG_DIR="$(cd -- "$(dirname "$PIPELINE_CONFIG")" && pwd)"
+    # If the config's output_dir is relative, resolve it relative to the config file directory
+    case "$RAW_OUTPUT_DIR" in
+        /*) OUTPUT_DIR="$RAW_OUTPUT_DIR" ;;
+        *) OUTPUT_DIR="${CONFIG_DIR}/${RAW_OUTPUT_DIR}" ;;
+    esac
+fi
+
 # Check ROOT environment
 if ! command -v root-config &> /dev/null; then
     echo "ERROR: ROOT not found. Please source ROOT environment:"
@@ -206,17 +256,17 @@ if [ "$RUN_STAGE1" = true ]; then
     fi
     echo ""
 
-    if [ ! -f "./convert_to_root" ]; then
-        echo "ERROR: convert_to_root executable not found"
+    if [ ! -f "${SCRIPT_DIR}/convert_to_root" ]; then
+        echo "ERROR: convert_to_root executable not found at ${SCRIPT_DIR}/convert_to_root"
         echo "Please run 'make' to build the executables"
         exit 1
     fi
 
     # Note: convert_to_root reads output_dir from config and automatically creates output_dir/root/
     if [ "$USE_PARALLEL" = true ]; then
-        ./convert_to_root --config "$PIPELINE_CONFIG" --root "$RAW_ROOT" --parallel
+        "${SCRIPT_DIR}/convert_to_root" --config "$PIPELINE_CONFIG" --root "$RAW_ROOT" --parallel
     else
-        ./convert_to_root --config "$PIPELINE_CONFIG" --root "$RAW_ROOT"
+        "${SCRIPT_DIR}/convert_to_root" --config "$PIPELINE_CONFIG" --root "$RAW_ROOT"
     fi
 
     if [ $? -ne 0 ]; then
@@ -244,13 +294,13 @@ if [ "$RUN_STAGE2" = true ]; then
         echo "  Mode:   PARALLEL"
         echo ""
 
-        if [ ! -x "./parallel_analyze.sh" ]; then
-            echo "ERROR: parallel_analyze.sh not found or not executable"
+        if [ ! -x "${SCRIPT_DIR}/parallel_analyze.sh" ]; then
+            echo "ERROR: parallel_analyze.sh not found or not executable at ${SCRIPT_DIR}/parallel_analyze.sh"
             echo "Please run 'make' to build the executables"
             exit 1
         fi
 
-        ./parallel_analyze.sh --config "$PIPELINE_CONFIG" --input "$RAW_ROOT" --output "$ANALYSIS_ROOT"
+        "${SCRIPT_DIR}/parallel_analyze.sh" --config "$PIPELINE_CONFIG" --input "$RAW_ROOT" --output "$ANALYSIS_ROOT"
 
         if [ $? -ne 0 ]; then
             echo "ERROR: Stage 2 (parallel) failed"
@@ -260,13 +310,13 @@ if [ "$RUN_STAGE2" = true ]; then
         echo "  Mode:   SEQUENTIAL"
         echo ""
 
-        if [ ! -f "./analyze_waveforms" ]; then
-            echo "ERROR: analyze_waveforms executable not found"
+        if [ ! -f "${SCRIPT_DIR}/analyze_waveforms" ]; then
+            echo "ERROR: analyze_waveforms executable not found at ${SCRIPT_DIR}/analyze_waveforms"
             echo "Please run 'make' to build the executables"
             exit 1
         fi
 
-        ./analyze_waveforms --config "$PIPELINE_CONFIG" --input "$RAW_ROOT" --output "$ANALYSIS_ROOT"
+        "${SCRIPT_DIR}/analyze_waveforms" --config "$PIPELINE_CONFIG" --input "$RAW_ROOT" --output "$ANALYSIS_ROOT"
 
         if [ $? -ne 0 ]; then
             echo "ERROR: Stage 2 failed"
@@ -280,8 +330,8 @@ fi
 if [ "$RUN_STAGE3" = true ]; then
     echo "Stage 3: Exporting analyzed data to HDF5 format..."
 
-    if [ ! -f "./export_to_hdf5" ]; then
-        echo "ERROR: export_to_hdf5 executable not found"
+    if [ ! -f "${SCRIPT_DIR}/export_to_hdf5" ]; then
+        echo "ERROR: export_to_hdf5 executable not found at ${SCRIPT_DIR}/export_to_hdf5"
         echo "Please run 'make' to build the executables"
         exit 1
     fi
@@ -293,7 +343,7 @@ import json, sys
 try:
     with open('$PIPELINE_CONFIG') as f:
         config = json.load(f)
-        stage2 = config.get('stage2', {})
+        stage2 = config.get('waveform_analyzer', {})
         sensor_mapping = stage2.get('sensor_mapping', {})
         sensor_ids = sensor_mapping.get('sensor_ids', [])
         unique_ids = sorted(set(sensor_ids))
@@ -313,35 +363,37 @@ except:
         SENSOR_IDS=""
     fi
 
-    # Export analysis features if they exist
+    # Export to Corryvreckan HDF5 format if analysis exists
     if [ -f "$OUTPUT_DIR/root/$ANALYSIS_ROOT" ] && [ "$RUN_STAGE2" = true ] || [ "$RUN_STAGE2" = false ]; then
         if [ -n "$SENSOR_IDS" ]; then
-            # Export per sensor
+            # Export per sensor in Corryvreckan format
             for SENSOR_ID in $SENSOR_IDS; do
-                OUTPUT_FILE="waveforms_analyzed_sensor$(printf '%02d' $SENSOR_ID).h5"
-                echo "  Exporting analysis features for sensor $SENSOR_ID..."
+                OUTPUT_FILE="waveforms_corry_sensor$(printf '%02d' $SENSOR_ID).h5"
+                echo "  Exporting Corryvreckan Hits for sensor $SENSOR_ID..."
                 echo "    Input:  $OUTPUT_DIR/root/$ANALYSIS_ROOT"
                 echo "    Output: $OUTPUT_DIR/hdf5/$OUTPUT_FILE"
 
-                ./export_to_hdf5 --mode analysis --input "$ANALYSIS_ROOT" --tree Analysis \
+                "${SCRIPT_DIR}/export_to_hdf5" --mode corry --input "$ANALYSIS_ROOT" --tree Analysis \
                     --output "$OUTPUT_FILE" --output-dir "$OUTPUT_DIR" \
-                    --sensor-id "$SENSOR_ID" --sensor-mapping "$PIPELINE_CONFIG"
+                    --sensor-id "$SENSOR_ID" --sensor-mapping "$PIPELINE_CONFIG" \
+                    --column-id 1
 
                 if [ $? -ne 0 ]; then
-                    echo "WARNING: Analysis feature export failed for sensor $SENSOR_ID (continuing anyway)"
+                    echo "WARNING: Corryvreckan export failed for sensor $SENSOR_ID (continuing anyway)"
                 fi
             done
         else
-            # Export all channels to single file
-            echo "  Exporting analysis features..."
+            # Export all channels to single file in Corryvreckan format
+            echo "  Exporting Corryvreckan Hits (all channels)..."
             echo "    Input:  $OUTPUT_DIR/root/$ANALYSIS_ROOT"
             echo "    Output: $OUTPUT_DIR/hdf5/$ANALYSIS_HDF5"
 
-            ./export_to_hdf5 --mode analysis --input "$ANALYSIS_ROOT" --tree Analysis \
-                --output "$ANALYSIS_HDF5" --output-dir "$OUTPUT_DIR"
+            "${SCRIPT_DIR}/export_to_hdf5" --mode corry --input "$ANALYSIS_ROOT" --tree Analysis \
+                --output "$ANALYSIS_HDF5" --output-dir "$OUTPUT_DIR" \
+                --sensor-mapping "$PIPELINE_CONFIG" --column-id 1
 
             if [ $? -ne 0 ]; then
-                echo "WARNING: Analysis feature export failed (continuing anyway)"
+                echo "WARNING: Corryvreckan export failed (continuing anyway)"
             fi
         fi
         echo ""

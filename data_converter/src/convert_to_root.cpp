@@ -187,21 +187,42 @@ bool ConvertBinaryToRoot(const WaveConverterConfig &cfg) {
   int consistencyWarningCount = 0;
   const int kConsistencyWarnLimit = 20;
   int eventCount = 0;
+  std::vector<bool> channelEof(cfg.n_channels(), false);
+
   while (running) {
-    ChannelHeader chHeader0;
-    if (!ReadHeader(fins[0], chHeader0)) {
-      std::cout << "EOF reached at event " << eventCount << " (ch0)" << std::endl;
+    // Try to read headers from all channels
+    std::vector<ChannelHeader> headers(cfg.n_channels());
+    std::vector<int> samplesThisEvent(cfg.n_channels(), 0);
+    bool anyEof = false;
+
+    for (int ch = 0; ch < cfg.n_channels(); ++ch) {
+      if (!ReadHeader(fins[ch], headers[ch])) {
+        channelEof[ch] = true;
+        anyEof = true;
+      }
+    }
+
+    // If any channel reached EOF, report detailed status and stop
+    if (anyEof) {
+      std::cout << "INFO: Event count mismatch detected - one or more channels reached EOF" << std::endl;
+      std::cout << "      Per-channel status at event " << eventCount << ":" << std::endl;
+      for (int ch = 0; ch < cfg.n_channels(); ++ch) {
+        std::cout << "        ch" << ch << ": "
+                  << (channelEof[ch] ? "reached EOF" : "has more data") << std::endl;
+      }
+      std::cout << "      Processing stopped. Total events processed: " << eventCount << std::endl;
       break;
     }
 
-    if (chHeader0.eventSize <= HEADER_BYTES) {
-      std::cerr << "ERROR: invalid event size " << chHeader0.eventSize
+    // Validate ch0 header
+    if (headers[0].eventSize <= HEADER_BYTES) {
+      std::cerr << "ERROR: invalid event size " << headers[0].eventSize
                 << " at event " << eventCount << " ch0" << std::endl;
       encounteredError = true;
       break;
     }
 
-    const uint32_t payloadBytes0 = chHeader0.eventSize - HEADER_BYTES;
+    const uint32_t payloadBytes0 = headers[0].eventSize - HEADER_BYTES;
     if (payloadBytes0 % sizeof(float) != 0) {
       std::cerr << "ERROR: payload not multiple of 4 bytes at event " << eventCount
                 << " ch0" << std::endl;
@@ -209,26 +230,18 @@ bool ConvertBinaryToRoot(const WaveConverterConfig &cfg) {
       break;
     }
 
-    const int nsamples0 = static_cast<int>(payloadBytes0 / sizeof(float));
+    samplesThisEvent[0] = static_cast<int>(payloadBytes0 / sizeof(float));
+    boardIds[0] = headers[0].boardId;
+    channelIds[0] = headers[0].channelId;
+    eventCounters[0] = headers[0].eventCounter;
 
-    std::vector<ChannelHeader> headers(cfg.n_channels());
-    std::vector<int> samplesThisEvent(cfg.n_channels(), 0);
-    headers[0] = chHeader0;
-    samplesThisEvent[0] = nsamples0;
-
+    // Validate and process other channels
     for (int ch = 1; ch < cfg.n_channels(); ++ch) {
-      if (!ReadHeader(fins[ch], headers[ch])) {
-        std::cerr << "EOF/read error at event " << eventCount << " channel " << ch
-                  << std::endl;
-        running = false;
-        encounteredError = true;
-        break;
-      }
       const uint32_t payloadBytes = headers[ch].eventSize - HEADER_BYTES;
-      if (headers[ch].eventSize != chHeader0.eventSize) {
+      if (headers[ch].eventSize != headers[0].eventSize) {
         std::cerr << "WARNING: event size mismatch event " << eventCount << " ch"
                   << ch << " (" << headers[ch].eventSize
-                  << " vs " << chHeader0.eventSize << ")" << std::endl;
+                  << " vs " << headers[0].eventSize << ")" << std::endl;
       }
       if (payloadBytes % sizeof(float) != 0) {
         std::cerr << "ERROR: payload not multiple of 4 bytes at event " << eventCount
@@ -250,16 +263,16 @@ bool ConvertBinaryToRoot(const WaveConverterConfig &cfg) {
     // Consistency checks across channels
     std::vector<std::string> consistencyIssues;
     for (int ch = 1; ch < cfg.n_channels(); ++ch) {
-      if (headers[ch].eventCounter != chHeader0.eventCounter) {
+      if (headers[ch].eventCounter != headers[0].eventCounter) {
         std::ostringstream oss;
         oss << "eventCounter mismatch at event " << eventCount << " ch" << ch
-            << " (" << headers[ch].eventCounter << " vs " << chHeader0.eventCounter << ")";
+            << " (" << headers[ch].eventCounter << " vs " << headers[0].eventCounter << ")";
         consistencyIssues.push_back(oss.str());
       }
-      if (headers[ch].boardId != chHeader0.boardId) {
+      if (headers[ch].boardId != headers[0].boardId) {
         std::ostringstream oss;
         oss << "boardId mismatch at event " << eventCount << " ch" << ch
-            << " (" << headers[ch].boardId << " vs " << chHeader0.boardId << ")";
+            << " (" << headers[ch].boardId << " vs " << headers[0].boardId << ")";
         consistencyIssues.push_back(oss.str());
       }
       if (headers[ch].channelId != static_cast<uint32_t>(ch)) {
@@ -331,11 +344,12 @@ bool ConvertBinaryToRoot(const WaveConverterConfig &cfg) {
       }
     }
 
-    boardIds[0] = chHeader0.boardId;
-    channelIds[0] = chHeader0.channelId;
-    eventCounters[0] = chHeader0.eventCounter;
     nsamplesBranch = maxSamples;
     nsamplesPerChannel = samplesThisEvent;
+
+    // Read payloads from all channels
+    std::vector<bool> readFailed(cfg.n_channels(), false);
+    bool anyReadFailed = false;
 
     for (int ch = 0; ch < cfg.n_channels(); ++ch) {
       const int nsampCh = samplesThisEvent[ch];
@@ -345,16 +359,29 @@ bool ConvertBinaryToRoot(const WaveConverterConfig &cfg) {
       fins[ch].read(reinterpret_cast<char *>(buffer.data()),
                     nsampCh * sizeof(float));
       if (!fins[ch].good()) {
-        std::cerr << "ERROR: failed to read payload at event " << eventCount
-                  << " ch" << ch << std::endl;
-        running = false;
-        encounteredError = true;
-        break;
+        readFailed[ch] = true;
+        anyReadFailed = true;
+      } else {
+        raw[ch] = std::move(buffer);
+        buffer.clear();
       }
+    }
 
-      raw[ch] = std::move(buffer);
-      buffer.clear();
+    // If any channel failed to read payload, report and stop
+    if (anyReadFailed) {
+      std::cout << "INFO: Payload read failure - one or more channels encountered early EOF" << std::endl;
+      std::cout << "      Per-channel status at event " << eventCount << ":" << std::endl;
+      for (int ch = 0; ch < cfg.n_channels(); ++ch) {
+        std::cout << "        ch" << ch << ": "
+                  << (readFailed[ch] ? "read failed (EOF)" : "read successful") << std::endl;
+      }
+      std::cout << "      Processing stopped. Total events processed: " << eventCount << std::endl;
+      break;
+    }
 
+    // Calculate pedestals and pedestal-subtracted waveforms
+    for (int ch = 0; ch < cfg.n_channels(); ++ch) {
+      const int nsampCh = samplesThisEvent[ch];
       const int pedWindow = std::max(1, cfg.pedestal_window);
       const int nPed = std::min(nsampCh, pedWindow);
       double pedVal = 0.0;
@@ -372,10 +399,6 @@ bool ConvertBinaryToRoot(const WaveConverterConfig &cfg) {
       for (int i = nsampCh; i < maxSamples; ++i) {
         ped[ch][i] = pedTarget;
       }
-    }
-
-    if (!running) {
-      break;
     }
 
     eventIdx = eventCount;
@@ -540,31 +563,27 @@ bool ConvertBinaryToRootParallel(const WaveConverterConfig &cfg) {
       break;
     }
 
-    // Verify all channels read the same number of events
+    // Find minimum number of events across all channels
     int nEventsInChunk = static_cast<int>(chunkData[0].size());
     bool chunkMismatch = false;
     for (int ch = 1; ch < cfg.n_channels(); ++ch) {
-      if (static_cast<int>(chunkData[ch].size()) != nEventsInChunk) {
+      int chEvents = static_cast<int>(chunkData[ch].size());
+      if (chEvents != nEventsInChunk) {
         chunkMismatch = true;
-        break;
+        if (chEvents < nEventsInChunk) {
+          nEventsInChunk = chEvents;
+        }
       }
     }
 
     if (chunkMismatch) {
-      std::cerr << "ERROR: event count mismatch in chunk " << chunkNumber
-                << " (per-channel counts with EOF flags):" << std::endl;
+      std::cout << "WARNING: Event count mismatch in chunk " << chunkNumber << std::endl;
+      std::cout << "         Per-channel event counts:" << std::endl;
       for (int ch = 0; ch < cfg.n_channels(); ++ch) {
-        std::cerr << "  ch" << ch << ": events=" << chunkData[ch].size()
-                  << " eof=" << static_cast<int>(channelEof[ch]) << std::endl;
+        std::cout << "           ch" << ch << ": " << chunkData[ch].size()
+                  << " events, EOF=" << static_cast<int>(channelEof[ch]) << std::endl;
       }
-      for (auto &fin : fins) {
-        if (fin.is_open()) {
-          fin.close();
-        }
-      }
-      file->Close();
-      delete file;
-      return false;
+      std::cout << "         Processing minimum: " << nEventsInChunk << " events" << std::endl;
     }
 
     if (nEventsInChunk == 0) {
@@ -811,7 +830,10 @@ bool ConvertAsciiToRoot(const WaveConverterConfig &cfg) {
   }
 
   std::vector<std::vector<AsciiEventBlock>> channelEvents(cfg.n_channels());
-  size_t expectedEvents = 0;
+  size_t minEvents = 0;
+  size_t maxEvents = 0;
+  bool eventCountMismatch = false;
+
   for (int ch = 0; ch < cfg.n_channels(); ++ch) {
     const std::string fname = BuildFileName(cfg, ch);
     if (!LoadAsciiChannelFile(fname, channelEvents[ch])) {
@@ -821,24 +843,41 @@ bool ConvertAsciiToRoot(const WaveConverterConfig &cfg) {
     }
     std::cout << "Loaded ASCII input " << fname << " with "
               << channelEvents[ch].size() << " event(s)." << std::endl;
+
+    size_t evtCount = channelEvents[ch].size();
     if (ch == 0) {
-      expectedEvents = channelEvents[ch].size();
-    } else if (channelEvents[ch].size() != expectedEvents) {
-      std::cerr << "ERROR: ASCII input " << fname << " has "
-                << channelEvents[ch].size()
-                << " events but expected " << expectedEvents << std::endl;
-      file->Close();
-      delete file;
-      return false;
+      minEvents = evtCount;
+      maxEvents = evtCount;
+    } else {
+      if (evtCount < minEvents) minEvents = evtCount;
+      if (evtCount > maxEvents) maxEvents = evtCount;
+      if (evtCount != channelEvents[0].size()) {
+        eventCountMismatch = true;
+      }
     }
   }
 
-  if (expectedEvents == 0) {
+  if (eventCountMismatch) {
+    std::cout << "WARNING: Event count mismatch detected across channels." << std::endl;
+    std::cout << "         Will process only the minimum number of events: "
+              << minEvents << std::endl;
+    for (int ch = 0; ch < cfg.n_channels(); ++ch) {
+      if (channelEvents[ch].size() != minEvents) {
+        std::cout << "         Channel " << ch << " has "
+                  << channelEvents[ch].size() << " events (will use first "
+                  << minEvents << ")" << std::endl;
+      }
+    }
+  }
+
+  if (minEvents == 0) {
     std::cerr << "ERROR: no events found in ASCII inputs." << std::endl;
     file->Close();
     delete file;
     return false;
   }
+
+  size_t expectedEvents = minEvents;
 
   const int pedWindow = std::max(1, cfg.pedestal_window);
   bool loggedNsamplesPadding = false;
