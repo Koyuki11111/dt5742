@@ -1,0 +1,20 @@
+{
+  "monitor": {
+    "input_file": "../Data/AC_LGAD_TEST/wave_0.dat",
+    "polling_interval_ms": 1000,
+    "display_update_interval_ms": 1000,
+    "rate_window_seconds": 10,
+
+    "qa_enabled": false,
+    "qa_sampling_interval": 10,
+    "qa_pedestal_samples": 100,
+    "qa_baseline_target": 3500.0,
+    "qa_baseline_tolerance": 50.0,
+    "qa_noise_threshold": 10.0,
+    "qa_signal_min": -1000.0,
+    "qa_signal_max": 5000.0,
+
+    "log_warnings": true,
+    "log_file": "monitor.log"
+  }
+}
