@@ -16,10 +16,11 @@
 
 namespace {
 
-// Helper function to extract sensor_ids (and optionally column_ids) from analysis config JSON
+// Helper function to extract sensor mapping (sensor_ids, column_ids, strip_ids) from analysis config JSON
 inline bool ExtractSensorIds(const std::string &configPath,
                              std::vector<int> &sensorIds,
                              std::vector<int> *columnIds = nullptr,
+                             std::vector<int> *stripIds = nullptr,
                              int defaultColumn = 1) {
   simdjson::dom::parser parser;
   simdjson::dom::element root;
@@ -54,6 +55,18 @@ inline bool ExtractSensorIds(const std::string &configPath,
         columnIds->empty()) {
       // If not provided, fill with defaultColumn
       columnIds->assign(sensorIds.size(), defaultColumn);
+    }
+  }
+
+  if (stripIds) {
+    stripIds->clear();
+    if (!GetIntArray(sensorMapping, "strip_ids", *stripIds) ||
+        stripIds->empty()) {
+      // If not provided, fill with channel index (0, 1, 2, ...)
+      stripIds->resize(sensorIds.size());
+      for (size_t i = 0; i < sensorIds.size(); ++i) {
+        (*stripIds)[i] = static_cast<int>(i);
+      }
     }
   }
 
@@ -542,6 +555,7 @@ bool ExportCorryHits(const std::string &rootFile,
                      int sensorFilter = -1,
                      const std::vector<int> *sensorIds = nullptr,
                      const std::vector<int> *columnIds = nullptr,
+                     const std::vector<int> *stripIds = nullptr,
                      int defaultColumn = 1,
                      bool onlyCorryFields = true) {
   TFile *fin = TFile::Open(rootFile.c_str(), "READ");
@@ -603,9 +617,12 @@ bool ExportCorryHits(const std::string &rootFile,
       } else {
         hit.column = static_cast<uint16_t>(defaultColumn);
       }
-      hit.row = (sensorIds && ch < static_cast<int>(sensorIds->size()))
-                    ? static_cast<uint16_t>((*sensorIds)[ch])
-                    : 0u;
+      // Row: use strip_ids if available, otherwise use channel index
+      if (stripIds && ch < static_cast<int>(stripIds->size())) {
+        hit.row = static_cast<uint16_t>((*stripIds)[ch]);
+      } else {
+        hit.row = static_cast<uint16_t>(ch);
+      }
       hit.raw = 0u;
       hit.charge =
           (charge && ch < static_cast<int>(charge->size())) ? static_cast<double>((*charge)[ch]) : 0.0;
@@ -717,6 +734,7 @@ int main(int argc, char **argv) {
   int defaultColumnId = 1;
   std::vector<int> sensorIds;
   std::vector<int> columnIds;
+  std::vector<int> stripIds;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -838,6 +856,7 @@ int main(int argc, char **argv) {
   // Load sensor mapping if requested
   const std::vector<int> *sensorIdsPtr = nullptr;
   const std::vector<int> *columnIdsPtr = nullptr;
+  const std::vector<int> *stripIdsPtr = nullptr;
   if (sensorFilter >= 0) {
     if (!useSensorMapping) {
       std::cerr << "ERROR: --sensor-id requires mapping, but --use-sensor-mapping=false" << std::endl;
@@ -847,21 +866,23 @@ int main(int argc, char **argv) {
       std::cerr << "ERROR: --sensor-id requires --sensor-mapping" << std::endl;
       return 1;
     }
-    if (!ExtractSensorIds(sensorMappingFile, sensorIds, &columnIds, defaultColumnId)) {
+    if (!ExtractSensorIds(sensorMappingFile, sensorIds, &columnIds, &stripIds, defaultColumnId)) {
       std::cerr << "ERROR: failed to load sensor IDs from " << sensorMappingFile << std::endl;
       return 1;
     }
     sensorIdsPtr = &sensorIds;
     columnIdsPtr = &columnIds;
+    stripIdsPtr = &stripIds;
     std::cout << "Filtering for sensor ID " << sensorFilter << std::endl;
   } else if (!sensorMappingFile.empty() && useSensorMapping) {
     // Allow mapping without filtering
-    if (!ExtractSensorIds(sensorMappingFile, sensorIds, &columnIds, defaultColumnId)) {
+    if (!ExtractSensorIds(sensorMappingFile, sensorIds, &columnIds, &stripIds, defaultColumnId)) {
       std::cerr << "ERROR: failed to load sensor IDs from " << sensorMappingFile << std::endl;
       return 1;
     }
     sensorIdsPtr = &sensorIds;
     columnIdsPtr = &columnIds;
+    stripIdsPtr = &stripIds;
   }
 
   // Build full paths with directory structure
@@ -892,6 +913,7 @@ int main(int argc, char **argv) {
                            sensorFilter,
                            sensorIdsPtr,
                            columnIdsPtr,
+                           stripIdsPtr,
                            defaultColumnId,
                            corryOnlyFields);
       if (ok && !corryOnlyFields) {
