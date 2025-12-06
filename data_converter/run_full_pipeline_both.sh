@@ -6,12 +6,16 @@
 set -e  # Exit on error
 
 # Default configuration
-BASE_CONFIG="converter_config.json"
 BASE_DATA_DIR="/data/test07"
 DAQ_NAMES=("daq01" "daq02")
 RUN_PARALLEL=false
 VERBOSE=false
 POSITIONAL_ARGS=()
+
+# Resolve script directory to locate helper scripts even when invoked elsewhere
+SCRIPT_DIR="$(cd -- "$(dirname "$0")" && pwd)"
+BASE_CONFIG="${SCRIPT_DIR}/converter_config.json"
+RUN_FULL_PIPELINE="${SCRIPT_DIR}/run_full_pipeline.sh"
 
 # Parse command line arguments
 print_usage() {
@@ -125,8 +129,8 @@ if ! command -v python3 &> /dev/null; then
 fi
 
 # Check if run_full_pipeline.sh exists
-if [ ! -f "./run_full_pipeline.sh" ]; then
-    echo "ERROR: run_full_pipeline.sh not found"
+if [ ! -f "$RUN_FULL_PIPELINE" ]; then
+    echo "ERROR: run_full_pipeline.sh not found at '$RUN_FULL_PIPELINE'"
     exit 1
 fi
 
@@ -160,13 +164,14 @@ process_daq() {
 
     # Create temporary config file for this DAQ
     echo "Creating configuration for $daq_name..."
-    python3 - "$BASE_CONFIG" "$config_file" "$daq_dir" <<'EOF'
+    python3 - "$BASE_CONFIG" "$config_file" "$daq_dir" "$daq_name" <<'EOF'
 import json
 import sys
 
 base_config_file = sys.argv[1]
 output_config_file = sys.argv[2]
 daq_dir = sys.argv[3]
+daq_name = sys.argv[4]
 
 # Read base configuration
 with open(base_config_file, 'r') as f:
@@ -175,6 +180,21 @@ with open(base_config_file, 'r') as f:
 # Update paths for this DAQ
 config['common']['output_dir'] = f"{daq_dir}/output"
 config['waveform_converter']['input_dir'] = daq_dir
+
+# Update sensor_ids based on DAQ name
+# DAQ01 (daq01): sensors 1,2 (channels 0-7: sensor 1, channels 8-15: sensor 2)
+# DAQ02 (daq02): sensors 3,4 (channels 0-7: sensor 3, channels 8-15: sensor 4)
+if 'waveform_analyzer' in config and 'sensor_mapping' in config['waveform_analyzer']:
+    if 'daq01' in daq_name.lower():
+        # DAQ01: sensors 1 and 2
+        config['waveform_analyzer']['sensor_mapping']['sensor_ids'] = [1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2]
+        print(f"  sensor_ids set to: Channels 0-7 -> Sensor 1, Channels 8-15 -> Sensor 2")
+    elif 'daq02' in daq_name.lower():
+        # DAQ02: sensors 3 and 4
+        config['waveform_analyzer']['sensor_mapping']['sensor_ids'] = [3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4]
+        print(f"  sensor_ids set to: Channels 0-7 -> Sensor 3, Channels 8-15 -> Sensor 4")
+    else:
+        print(f"  WARNING: Unknown DAQ name '{daq_name}', using default sensor_ids")
 
 # Write updated configuration
 with open(output_config_file, 'w') as f:
@@ -195,9 +215,9 @@ EOF
     # Run the pipeline for this DAQ
     echo "Running pipeline for $daq_name..."
     if [ "$VERBOSE" = true ]; then
-        ./run_full_pipeline.sh --config "$config_file" --verbose
+        "$RUN_FULL_PIPELINE" --config "$config_file" --verbose
     else
-        ./run_full_pipeline.sh --config "$config_file"
+        "$RUN_FULL_PIPELINE" --config "$config_file"
     fi
 
     if [ $? -eq 0 ]; then

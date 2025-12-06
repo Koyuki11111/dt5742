@@ -126,6 +126,27 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
 
   openWaveformPlotsFile(waveformPlotsFile, waveformPlotsFileCounter);
 
+  // Create quality check ROOT file
+  TFile *qualityCheckFile = nullptr;
+  if (cfg.waveform_plots_enabled) {
+    std::string qualityCheckFileName = BuildOutputPath(cfg.output_dir(), "quality_check",
+                                                       "quality_check.root");
+    if (!EnsureParentDirectory(qualityCheckFileName)) {
+      std::cerr << "WARNING: Failed to create quality_check output directory for "
+                << qualityCheckFileName << std::endl;
+    } else {
+      qualityCheckFile = TFile::Open(qualityCheckFileName.c_str(), "RECREATE");
+      if (!qualityCheckFile || qualityCheckFile->IsZombie()) {
+        std::cerr << "WARNING: Failed to create quality_check output file "
+                  << qualityCheckFileName << std::endl;
+        std::cerr << "         Continuing without quality_check output..." << std::endl;
+        qualityCheckFile = nullptr;
+      } else {
+        std::cout << "Quality check output enabled. Saving to: " << qualityCheckFileName << std::endl;
+      }
+    }
+  }
+
   // Build input path: output_dir/root/input_root
   std::string inputPath = BuildOutputPath(cfg.output_dir(), "root", cfg.input_root());
 
@@ -442,7 +463,7 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
     }
 
     // Create 2D histograms for each sensor showing signal amplitudes
-    if (waveformPlotsFile) {
+    if (waveformPlotsFile || qualityCheckFile) {
       // Determine which sensors are present and how many strips each has
       std::map<int, std::vector<int>> sensorStrips;  // sensor ID -> list of strip IDs
       std::map<int, std::vector<int>> sensorChannels; // sensor ID -> list of channel indices
@@ -454,13 +475,19 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
         sensorChannels[sensorID].push_back(ch);
       }
 
-      // Create event directory if not exists
+      // Create event directory if not exists (for waveformPlotsFile)
       char eventDirName[64];
       std::snprintf(eventDirName, sizeof(eventDirName), "event_%06d", eventIdx);
-      TDirectory *eventDir = waveformPlotsFile->GetDirectory(eventDirName);
-      if (!eventDir) {
-        eventDir = waveformPlotsFile->mkdir(eventDirName);
+      TDirectory *eventDir = nullptr;
+      if (waveformPlotsFile) {
+        eventDir = waveformPlotsFile->GetDirectory(eventDirName);
+        if (!eventDir) {
+          eventDir = waveformPlotsFile->mkdir(eventDirName);
+        }
       }
+
+      // Store histograms for quality check canvas
+      std::map<int, TH2F*> sensorHistograms;
 
       // Create histogram for each sensor
       for (const auto &sensorPair : sensorStrips) {
@@ -488,17 +515,66 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
           hist->Fill(0.5, stripID, amplitude);  // X=0.5 (center of bin), Y=stripID
         }
 
-        // Save to sensor directory within event
-        TDirectory *sensorDir = eventDir->GetDirectory(Form("sensor%02d", sensorID));
-        if (!sensorDir) {
-          sensorDir = eventDir->mkdir(Form("sensor%02d", sensorID));
+        // Save to sensor directory within event (for waveformPlotsFile)
+        if (waveformPlotsFile && eventDir) {
+          TDirectory *sensorDir = eventDir->GetDirectory(Form("sensor%02d", sensorID));
+          if (!sensorDir) {
+            sensorDir = eventDir->mkdir(Form("sensor%02d", sensorID));
+          }
+          sensorDir->cd();
+          hist->Write(hist->GetName(), TObject::kOverwrite);
         }
-        sensorDir->cd();
-        hist->Write(hist->GetName(), TObject::kOverwrite);
-        delete hist;
+
+        // Store histogram for quality check canvas
+        sensorHistograms[sensorID] = hist;
       }
 
-      waveformPlotsFile->cd();
+      // Create quality check canvas with all 4 sensors
+      if (qualityCheckFile && sensorHistograms.size() >= 4) {
+        qualityCheckFile->cd();
+
+        // Create canvas with 4 columns (1x4 layout)
+        char canvasName[64];
+        std::snprintf(canvasName, sizeof(canvasName), "event_%06d_quality_check", eventIdx);
+        TCanvas *canvas = new TCanvas(canvasName,
+                                      Form("Event %d - All Sensors Quality Check", eventIdx),
+                                      2400, 600);  // Wide canvas for 4 columns
+        canvas->Divide(4, 1);  // 4 columns, 1 row
+
+        // Draw each sensor in its own pad (sensors 1-4)
+        for (int sensorID = 1; sensorID <= 4; ++sensorID) {
+          canvas->cd(sensorID);  // Move to pad sensorID
+
+          auto it = sensorHistograms.find(sensorID);
+          if (it != sensorHistograms.end()) {
+            // Clone the histogram to avoid deletion issues
+            TH2F *histClone = (TH2F*)it->second->Clone(Form("sensor%02d_qc_clone", sensorID));
+            histClone->SetStats(0);  // Hide statistics box
+            histClone->Draw("COLZ");  // Draw with color scale
+          } else {
+            // Create empty histogram if sensor not found
+            TH2F *emptyHist = new TH2F(Form("sensor%02d_empty", sensorID),
+                                       Form("Event %d - Sensor %02d (No Data);X;Strip;Amplitude (V)",
+                                            eventIdx, sensorID),
+                                       1, 0, 1, 8, 0, 8);
+            emptyHist->SetStats(0);
+            emptyHist->Draw("COLZ");
+          }
+        }
+
+        // Save canvas to quality check file
+        canvas->Write(canvasName, TObject::kOverwrite);
+        delete canvas;  // Canvas deletion will handle cloned histograms
+      }
+
+      // Clean up sensor histograms
+      for (auto &pair : sensorHistograms) {
+        delete pair.second;
+      }
+
+      if (waveformPlotsFile) {
+        waveformPlotsFile->cd();
+      }
     }
 
     // Check if waveform plots file needs rotation (after saving all plots for this event)
@@ -515,6 +591,12 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
       waveformPlotsFile->Close();
       delete waveformPlotsFile;
       waveformPlotsFile = nullptr;
+    }
+    if (qualityCheckFile) {
+      qualityCheckFile->cd();
+      qualityCheckFile->Close();
+      delete qualityCheckFile;
+      qualityCheckFile = nullptr;
     }
     outputFile->Close();
     inputFile->Close();
@@ -537,6 +619,15 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
       std::cout << "  Total files created: " << (waveformPlotsFileCounter + 1)
                 << " (split due to 4GB size limit)" << std::endl;
     }
+  }
+
+  // Close quality check file if it was created
+  if (qualityCheckFile) {
+    std::string finalFileName = qualityCheckFile->GetName();
+    qualityCheckFile->cd();
+    qualityCheckFile->Close();
+    delete qualityCheckFile;
+    std::cout << "Quality check output saved to " << finalFileName << std::endl;
   }
 
   std::string outputFullPath = BuildOutputPath(cfg.output_dir(), "root", cfg.output_root());
