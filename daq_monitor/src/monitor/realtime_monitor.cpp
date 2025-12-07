@@ -98,7 +98,8 @@ double RateCalculator::GetRate() const {
 
 // BinaryFileMonitor implementation
 BinaryFileMonitor::BinaryFileMonitor(const std::string& file_path)
-    : file_path_(file_path), last_position_(0), has_new_data_(false) {}
+    : file_path_(file_path), last_position_(0), has_new_data_(false),
+      last_known_size_(0), recheck_done_(false) {}
 
 bool BinaryFileMonitor::Open() {
   file_.open(file_path_, std::ios::binary);
@@ -107,6 +108,8 @@ bool BinaryFileMonitor::Open() {
   }
   last_position_ = 0;
   has_new_data_ = false;
+  last_known_size_ = 0;
+  recheck_done_ = false;
   return true;
 }
 
@@ -119,15 +122,50 @@ bool BinaryFileMonitor::CheckNewData() {
     return false;
   }
 
-  file_.seekg(0, std::ios::end);
-  std::streampos current_size = file_.tellg();
+  // Use stat() to get actual file size from filesystem
+  // This avoids stream buffering/caching issues
+  struct stat file_stat;
+  if (stat(file_path_.c_str(), &file_stat) != 0) {
+    return false;
+  }
 
+  std::streampos current_size = file_stat.st_size;
+
+  // Check if file has grown
   if (current_size > last_position_) {
+    // Clear any error flags and sync stream with actual file state
+    file_.clear();
     file_.seekg(last_position_);
     has_new_data_ = true;
+
+    // File size changed, reset recheck flag for next stable period
+    if (current_size != last_known_size_) {
+      recheck_done_ = false;
+    }
+    last_known_size_ = current_size;
     return true;
   }
 
+  // File hasn't grown beyond our read position
+  // Check if size is stable and we haven't done the final recheck yet
+  if (current_size == last_known_size_) {
+    // Size is stable (same as last check)
+    if (!recheck_done_) {
+      // Do one more check to catch any missed events
+      file_.clear();
+      file_.seekg(last_position_);
+      has_new_data_ = true;
+      recheck_done_ = true;
+      return true;
+    }
+    // Already rechecked, no more checking needed
+    has_new_data_ = false;
+    return false;
+  }
+
+  // Size changed but not beyond read position - update and reset recheck
+  last_known_size_ = current_size;
+  recheck_done_ = false;
   has_new_data_ = false;
   return false;
 }
@@ -183,10 +221,13 @@ bool BinaryFileMonitor::ReadNextEvent(uint32_t& event_num, std::vector<float>& w
   event_num = header.eventCounter;
   last_position_ = file_.tellg();
 
-  // Check if there's more data
-  file_.seekg(0, std::ios::end);
-  has_new_data_ = (file_.tellg() > last_position_);
-  file_.seekg(last_position_);
+  // Check if there's more data using stat() to avoid caching issues
+  struct stat file_stat;
+  if (stat(file_path_.c_str(), &file_stat) == 0) {
+    has_new_data_ = (static_cast<std::streampos>(file_stat.st_size) > last_position_);
+  } else {
+    has_new_data_ = false;
+  }
 
   return true;
 }

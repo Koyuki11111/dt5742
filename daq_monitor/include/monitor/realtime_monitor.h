@@ -96,6 +96,8 @@ private:
   std::ifstream file_;
   std::streampos last_position_;
   bool has_new_data_;
+  std::streampos last_known_size_;
+  bool recheck_done_;
 };
 
 // ASCII file monitor for incremental reading
