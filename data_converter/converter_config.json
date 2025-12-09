@@ -4,6 +4,7 @@
     "n_channels": 16,
     "max_cores": 8,
     "chunk_size": 100,
+    "max_events": 10000,
     "temp_dir": "./temp",
     "nsamples_policy": "pad",
     "waveforms_root": "waveforms.root",

@@ -8,6 +8,7 @@ struct CommonConfig {
   int n_channels = 16;
   int max_cores = 8;
   int chunk_size = 100;
+  int max_events = 100;
   std::string temp_dir = "./temp";
   std::string waveforms_root = "waveforms.root";
   std::string waveforms_tree = "Waveforms";

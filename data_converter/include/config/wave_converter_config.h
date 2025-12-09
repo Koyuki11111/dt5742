@@ -15,12 +15,14 @@ struct WaveConverterConfig {
   std::string output_dir() const { return common.output_dir; }
   int n_channels() const { return common.n_channels; }
   int max_cores() const { return common.max_cores; }
+  int max_events() const { return common.max_events; }
   int chunk_size() const { return common.chunk_size; }
   std::string temp_dir() const { return common.temp_dir; }
   std::string root_file() const { return common.waveforms_root; }
   std::string tree_name() const { return common.waveforms_tree; }
   void set_n_channels(int v) { common.n_channels = v; }
   void set_max_cores(int v) { common.max_cores = v; }
+  void set_max_events(int v) { common.max_events = v; }
   void set_chunk_size(int v) { common.chunk_size = v; }
   void set_root_file(const std::string &v) { common.waveforms_root = v; }
   void set_tree_name(const std::string &v) { common.waveforms_tree = v; }
@@ -59,6 +61,9 @@ inline bool LoadConfigFromJson(const std::string &path,
     }
     if (GetNumber(common, "max_cores", numValue)) {
       cfg.common.max_cores = static_cast<int>(numValue);
+    }
+    if (GetNumber(common, "max_events", numValue)) {
+      cfg.common.max_events = static_cast<int>(numValue);
     }
     if (GetNumber(common, "chunk_size", numValue)) {
       cfg.common.chunk_size = static_cast<int>(numValue);

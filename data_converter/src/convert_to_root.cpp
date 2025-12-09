@@ -22,6 +22,16 @@ namespace {
 enum class NsamplesPolicy { kStrict, kPad };
 enum class EventPolicy { kError, kWarn, kSkip };
 
+bool kSetEventLimit = false;
+
+void CheckEventLimit(const WaveConverterConfig &cfg){
+  if ( cfg.max_events() < 0) {
+    kSetEventLimit = false;
+  } else {
+    kSetEventLimit = true;
+  }
+}
+  
 NsamplesPolicy ResolveNsamplesPolicy(const std::string &policyText) {
   std::string lowered = policyText;
   std::transform(lowered.begin(), lowered.end(), lowered.begin(),
@@ -452,6 +462,13 @@ bool ConvertBinaryToRootParallel(const WaveConverterConfig &cfg) {
   std::cout << "Creating ROOT file (parallel mode): " << outputPath << std::endl;
   std::cout << "Chunk size: " << cfg.chunk_size() << ", Max cores: " << cfg.max_cores() << std::endl;
 
+  CheckEventLimit(cfg);
+  if ( kSetEventLimit ) {
+    std::cout<<"The number of analyze event size is set = "<<cfg.max_events()<<std::endl;
+  } else {
+    std::cout<<"All events will be analyzed"<<std::endl;
+  }
+  
   TTree *tree = new TTree(cfg.tree_name().c_str(), "Raw waveforms");
 
   int eventIdx = 0;
@@ -589,9 +606,15 @@ bool ConvertBinaryToRootParallel(const WaveConverterConfig &cfg) {
     if (nEventsInChunk == 0) {
       break;
     }
-
+    
     // Fill TTree with this chunk
     for (int evt = 0; evt < nEventsInChunk; ++evt) {
+
+      if ( kSetEventLimit && evt >= cfg.max_events()) {
+	std::cout<<"Reach the events limits (" <<evt<<")"<<std::endl;
+	break;
+      }
+      
       std::vector<int> samplesThisEvent(cfg.n_channels(), 0);
       for (int ch = 0; ch < cfg.n_channels(); ++ch) {
         samplesThisEvent[ch] =
@@ -784,8 +807,15 @@ bool ConvertAsciiToRoot(const WaveConverterConfig &cfg) {
     return false;
   }
 
+  CheckEventLimit(cfg);
+  if ( kSetEventLimit ) {
+    std::cout<<"The number of analyze event size is set = "<<cfg.max_events()<<std::endl;
+  } else {
+    std::cout<<"All events will be analyzed"<<std::endl;
+  }
+  
   std::cout << "Creating ROOT file: " << outputPath << std::endl;
-
+  
   TTree *tree = new TTree(cfg.tree_name().c_str(), "Raw waveforms");
 
   int eventIdx = 0;
@@ -883,6 +913,12 @@ bool ConvertAsciiToRoot(const WaveConverterConfig &cfg) {
   bool loggedNsamplesPadding = false;
   bool loggedEventPolicyInfo = false;
   for (size_t evt = 0; evt < expectedEvents; ++evt) {
+
+    if ( kSetEventLimit && evt >= cfg.max_events()) {
+      std::cout<<"Reach the events limits (" <<evt<<")"<<std::endl;
+      break;
+    }
+
     std::vector<int> samplesThisEvent(cfg.n_channels(), 0);
     for (int ch = 0; ch < cfg.n_channels(); ++ch) {
       samplesThisEvent[ch] = static_cast<int>(channelEvents[ch][evt].samples.size());
