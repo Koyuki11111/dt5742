@@ -737,14 +737,14 @@ bool ConvertBinaryToRootParallel(const WaveConverterConfig &cfg) {
         boardIds[ch] = evtData.boardId;
         channelIds[ch] = evtData.channelId;
         eventCounters[ch] = evtData.eventCounter;
-        raw[ch] = std::move(evtData.samples);
-        evtData.samples.clear();
+	raw[ch] = std::move(evtData.samples);
+	evtData.samples.clear();
 
         // Calculate pedestal
-        const int nPed = std::min<int>(evtData.samples.size(), pedWindow);
+        const int nPed = std::min<int>(raw[ch].size(), pedWindow);
         double pedVal = 0.0;
         for (int i = 0; i < nPed; ++i) {
-          pedVal += raw[ch][i];
+	  pedVal += raw[ch][i];
         }
         pedVal /= static_cast<double>(std::max(1, nPed));
         pedestals[ch] = static_cast<float>(pedVal);
@@ -1013,9 +1013,9 @@ bool ConvertAsciiToRoot(const WaveConverterConfig &cfg) {
       boardIds[ch] = block.boardId;
       channelIds[ch] = block.channelId;
       eventCounters[ch] = block.eventCounter;
-      raw[ch] = block.samples;
+      raw[ch] = std::move(block.samples);
 
-      const int nPed = std::min<int>(block.samples.size(), pedWindow);
+      const int nPed = std::min<int>(raw[ch].size(), pedWindow);
       double pedVal = 0.0;
       for (int i = 0; i < nPed; ++i) {
         pedVal += raw[ch][i];
