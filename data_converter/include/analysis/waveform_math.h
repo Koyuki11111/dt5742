@@ -43,11 +43,12 @@ struct WaveformFeatures {
   float charge = 0.0f;
   float signalOverNoise = 0.0f;
   float peakTime = 0.0f;
-
+  
   // Timing
   float riseTime = 0.0f;
   float slewRate = 0.0f;
-
+  float jitterRMS= 0.0f;
+  
   // Multi-threshold timing
   std::vector<float> timeCFD;
   std::vector<float> jitterCFD;

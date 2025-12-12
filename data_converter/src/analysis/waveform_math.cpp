@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+using namespace std;
+
 namespace {
 
 float Interpolate(float x1, float y1, float x2, float y2, float yTarget) {
@@ -32,10 +34,10 @@ WindowIndices BuildWindowIndices(const std::vector<float> &time,
   if (time.empty()) {
     return window;
   }
-
+  
   int start_idx = FindTimeIndex(time, region_min);
   int end_idx = FindTimeIndex(time, region_max);
-
+  
   int nSamples = static_cast<int>(time.size());
   window.start = std::max(0, std::min(std::max(start_idx, analysis_start), nSamples - 1));
   window.end = std::max(window.start, std::min(std::min(end_idx, analysis_end), nSamples - 1));
@@ -287,9 +289,9 @@ WaveformFeatures AnalyzeWaveform(const std::vector<float> &amp,
   const float chargeMin = cfg.charge_region_min[channel];
   const float chargeMax = cfg.charge_region_max[channel];
   const int polarity = cfg.signal_polarity[channel];
-
+  
   float dT = (nSamples > 1) ? (time[1] - time[0]) : 0.2f;
-
+  
   WindowIndices analysis_window;
   analysis_window.start = 0;
   analysis_window.end = nSamples - 1;
@@ -308,22 +310,24 @@ WaveformFeatures AnalyzeWaveform(const std::vector<float> &amp,
 
   WindowIndices baseline_window = BuildWindowIndices(time, baselineMin, baselineMax,
                                                      analysis_window.start, analysis_window.end);
+  
   BaselineNoiseMetrics baseline_metrics = ComputeBaselineAndNoise(amp, baseline_window);
   features.baseline = baseline_metrics.baseline;
   features.rmsNoise = baseline_metrics.rms_noise;
   features.noise1Point = baseline_metrics.noise1_point;
   features.ampMinBefore = baseline_metrics.amp_min;
   features.ampMaxBefore = baseline_metrics.amp_max;
-
+  
   std::vector<float> ampCorr = ApplyBaselineAndPolarity(amp, features.baseline, polarity);
-
+  
   WindowIndices signal_window = BuildWindowIndices(time, signalMin, signalMax,
                                                    analysis_window.start, analysis_window.end);
+  
   PeakMetrics peak = FindPeakInWindow(ampCorr, time, signal_window);
   features.ampMax = peak.amplitude;
   features.peakTime = peak.time;
   int posampmax = peak.index;
-
+  
   if (features.rmsNoise > 0.0f) {
     features.signalOverNoise = features.ampMax / features.rmsNoise;
     features.hasSignal = (features.signalOverNoise >= cfg.snr_threshold) &&
@@ -397,5 +401,7 @@ WaveformFeatures AnalyzeWaveform(const std::vector<float> &amp,
     features.slewRate = (amp90 - amp10) / features.riseTime;
   }
 
+  features.jitterRMS = features.rmsNoise / features.slewRate;
+  
   return features;
 }

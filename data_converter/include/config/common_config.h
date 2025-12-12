@@ -4,9 +4,13 @@
 
 // Fields shared across stages.
 struct CommonConfig {
+  std::string daq_name   = "daq01";
+  std::string input_dir  = "output";
   std::string output_dir = "output";
+  int runnumber  = 1;
   int n_channels = 16;
-  int max_cores = 8;
+  int n_sensors  = 1;
+  int max_cores  = 8;
   int chunk_size = 100;
   int max_events = 100;
   std::string temp_dir = "./temp";

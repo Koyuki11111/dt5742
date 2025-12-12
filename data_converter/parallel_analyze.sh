@@ -101,23 +101,18 @@ if [ ! -x "$ANALYZE_BIN" ]; then
     exit 1
 fi
 
-# Extract output_dir from config
-OUTPUT_DIR=$(python3 -c "
-import json, sys
-try:
-    with open('$CONFIG') as f:
-        config = json.load(f)
-        print(config.get('common', {}).get('output_dir', 'output'))
-except Exception:
-    print('output')
-" 2>/dev/null)
 
-if [ -z "$OUTPUT_DIR" ]; then
-    OUTPUT_DIR="output"
-fi
+daq_name=$(sed -nE 's/^[[:space:]]*"daq_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$CONFIG" | head -n1)
+runnumber=$(sed -nE 's/^[[:space:]]*"runnumber"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$CONFIG" | head -n1)
+output_dir=$(sed -nE 's/^[[:space:]]*"output_dir"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$CONFIG" | head -n1)
+
+run_str=$(printf "%06d" "$runnumber")
+
+OUTPUT_DIR="${output_dir}/${run_str}/${daq_name}"
+
 
 # Build full input path
-INPUT_PATH="$OUTPUT_DIR/root/$INPUT_ROOT"
+INPUT_PATH="$OUTPUT_DIR/output/root/$INPUT_ROOT"
 
 if [ ! -f "$INPUT_PATH" ]; then
     echo "ERROR: Input file not found: $INPUT_PATH"
@@ -129,7 +124,7 @@ echo "Parallel Waveform Analysis"
 echo "=========================================="
 echo "Config:      $CONFIG"
 echo "Input:       $INPUT_PATH"
-echo "Output:      $OUTPUT_DIR/root/$OUTPUT_ROOT"
+echo "Output:      $OUTPUT_DIR/output/root/$OUTPUT_ROOT"
 echo "Chunk size:  $CHUNK_SIZE events"
 echo "Max cores:   $MAX_CORES"
 echo "Temp dir:    $TEMP_DIR"
@@ -202,23 +197,22 @@ process_chunk() {
         --output "$(basename $CHUNK_OUTPUT)" \
         --event-range "$START_EVENT:$END_EVENT" \
         --waveform-plots-file "$CHUNK_PLOTS" \
-        > "$TEMP_DIR/chunk_${CHUNK_ID}.log" 2>&1
-
+        > "$TEMP_DIR/chunk_${CHUNK_ID}.log" 2>&1    
     # Move output to temp directory
-    if [ -f "$OUTPUT_DIR/root/$(basename $CHUNK_OUTPUT)" ]; then
-        mv "$OUTPUT_DIR/root/$(basename $CHUNK_OUTPUT)" "$CHUNK_OUTPUT"
+    if [ -f "$OUTPUT_DIR/output/root/$(basename $CHUNK_OUTPUT)" ]; then	
+	mv "$OUTPUT_DIR/output/root/$(basename $CHUNK_OUTPUT)" "$CHUNK_OUTPUT"
+    else
+	echo "ERROR: Missing $OUTPUT_DIR/$(basename $CHUNK_OUTPUT)"
     fi
-
     # Move waveform plots to temp directory if it exists
-    if [ -f "$OUTPUT_DIR/waveform_plots/${CHUNK_PLOTS}.root" ]; then
-        mv "$OUTPUT_DIR/waveform_plots/${CHUNK_PLOTS}.root" "$TEMP_DIR/${CHUNK_PLOTS}.root"
+    if [ -f "$OUTPUT_DIR/output/waveform_plots/${CHUNK_PLOTS}.root" ]; then
+        mv "$OUTPUT_DIR/output/waveform_plots/${CHUNK_PLOTS}.root" "$TEMP_DIR/${CHUNK_PLOTS}.root"
     fi
-
     # Move quality check files to temp directory if they exist
     # Quality check files follow the same naming scheme as waveform plots
     local CHUNK_QC=$(echo "$CHUNK_PLOTS" | sed 's/waveform_plots/quality_check/')
-    if [ -f "$OUTPUT_DIR/quality_check/${CHUNK_QC}.root" ]; then
-        mv "$OUTPUT_DIR/quality_check/${CHUNK_QC}.root" "$TEMP_DIR/${CHUNK_QC}.root"
+    if [ -f "$OUTPUT_DIR/output/quality_check/${CHUNK_QC}.root" ]; then
+        mv "$OUTPUT_DIR/output/quality_check/${CHUNK_QC}.root" "$TEMP_DIR/${CHUNK_QC}.root"
     fi
 
     if [ $? -eq 0 ]; then
@@ -290,7 +284,7 @@ if [ $MISSING_CHUNKS -gt 0 ]; then
 fi
 
 # Use hadd to merge analysis ROOT files
-OUTPUT_PATH="$OUTPUT_DIR/root/$OUTPUT_ROOT"
+OUTPUT_PATH="$OUTPUT_DIR/output/root/$OUTPUT_ROOT"
 hadd -f "$OUTPUT_PATH" "$TEMP_DIR"/chunk_*.root > "$TEMP_DIR/merge.log" 2>&1
 
 if [ $? -ne 0 ]; then
@@ -306,10 +300,10 @@ PLOTS_FILES=("$TEMP_DIR"/waveform_plots_chunk_*.root)
 if [ -f "${PLOTS_FILES[0]}" ]; then
     echo "Merging waveform plots files..."
 
-    PLOTS_OUTPUT="$OUTPUT_DIR/waveform_plots/waveform_plots.root"
+    PLOTS_OUTPUT="$OUTPUT_DIR/output/waveform_plots/waveform_plots.root"
 
     # Ensure output directory exists
-    mkdir -p "$OUTPUT_DIR/waveform_plots"
+    mkdir -p "$OUTPUT_DIR/output/waveform_plots"
 
     hadd -f "$PLOTS_OUTPUT" "$TEMP_DIR"/waveform_plots_chunk_*.root > "$TEMP_DIR/merge_plots.log" 2>&1
 
@@ -340,10 +334,10 @@ QC_FILES=("$TEMP_DIR"/quality_check_chunk_*.root)
 if [ -f "${QC_FILES[0]}" ]; then
     echo "Merging quality check files..."
 
-    QC_OUTPUT="$OUTPUT_DIR/quality_check/quality_check.root"
+    QC_OUTPUT="$OUTPUT_DIR/output/quality_check/quality_check.root"
 
     # Ensure output directory exists
-    mkdir -p "$OUTPUT_DIR/quality_check"
+    mkdir -p "$OUTPUT_DIR/output/quality_check"
 
     hadd -f "$QC_OUTPUT" "$TEMP_DIR"/quality_check_chunk_*.root > "$TEMP_DIR/merge_qc.log" 2>&1
 

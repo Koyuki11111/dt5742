@@ -25,9 +25,17 @@
 #include "analysis/waveform_math.h"
 #include "analysis/waveform_plotting.h"
 
+using namespace std;
 
 namespace {
 
+std::string to6digits(int n) {
+    std::ostringstream oss;
+    oss << std::setw(6) << std::setfill('0') << n;
+    return oss.str();
+}
+
+  
 bool EnsureParentDirectory(const std::string &path) {
   size_t lastSlash = path.find_last_of('/');
   if (lastSlash != std::string::npos) {
@@ -61,7 +69,7 @@ bool IsSensorHorizontal(int sensorID, const AnalysisConfig& cfg) {
   std::set<int> uniqueSensors(cfg.sensor_ids.begin(), cfg.sensor_ids.end());
   std::vector<int> sortedSensors(uniqueSensors.begin(), uniqueSensors.end());
   std::sort(sortedSensors.begin(), sortedSensors.end());
-
+  
   // Find index of this sensorID in the sorted unique list
   auto it = std::find(sortedSensors.begin(), sortedSensors.end(), sensorID);
   if (it == sortedSensors.end()) {
@@ -79,11 +87,15 @@ bool IsSensorHorizontal(int sensorID, const AnalysisConfig& cfg) {
 bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t eventEnd = -1) {
   // Maximum file size for waveform plots: 4 GB
   const Long64_t MAX_PLOTS_FILE_SIZE = 4LL * 1024 * 1024 * 1024;  // 4 GB in bytes
-
+  
   // Create waveform plots ROOT file if enabled
   TFile *waveformPlotsFile = nullptr;
   int waveformPlotsFileCounter = 0;
 
+  string outname_base = cfg.output_dir()+'/';
+  outname_base += to6digits(cfg.runnumber())+'/';
+  outname_base += cfg.daq_name()+"/output/";
+  
   auto openWaveformPlotsFile = [&](TFile *&outFile, int fileNum) {
     if (!cfg.waveform_plots_enabled) {
       return;
@@ -91,14 +103,14 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
 
     std::string baseFileName = cfg.waveform_plots_dir;
     std::string waveformPlotsFileName;
-
+    
     if (fileNum == 0) {
-      waveformPlotsFileName = BuildOutputPath(cfg.output_dir(), "waveform_plots",
+      waveformPlotsFileName = BuildOutputPath(outname_base, "waveform_plots",
                                                baseFileName + ".root");
     } else {
       char suffix[32];
       std::snprintf(suffix, sizeof(suffix), "_%03d.root", fileNum);
-      waveformPlotsFileName = BuildOutputPath(cfg.output_dir(), "waveform_plots",
+      waveformPlotsFileName = BuildOutputPath(outname_base, "waveform_plots",
                                                baseFileName + suffix);
     }
 
@@ -121,7 +133,7 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
                 << cfg.snr_threshold << ")" << std::endl;
     }
   };
-
+  
   auto checkAndRotateWaveformPlotsFile = [&](TFile *&outFile) {
     if (!outFile || outFile->IsZombie()) {
       return;
@@ -164,8 +176,8 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
       // Fallback: just use "quality_check" prefix
       qualityCheckBaseName = "quality_check_" + qualityCheckBaseName;
     }
-
-    std::string qualityCheckFileName = BuildOutputPath(cfg.output_dir(), "quality_check",
+    
+    std::string qualityCheckFileName = BuildOutputPath(outname_base, "quality_check",
                                                        qualityCheckBaseName + ".root");
     if (!EnsureParentDirectory(qualityCheckFileName)) {
       std::cerr << "WARNING: Failed to create quality_check output directory for "
@@ -184,7 +196,7 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
   }
 
   // Build input path: output_dir/root/input_root
-  std::string inputPath = BuildOutputPath(cfg.output_dir(), "root", cfg.input_root());
+  std::string inputPath = BuildOutputPath(outname_base, "root", cfg.input_root());
 
   // Open input ROOT file
   TFile *inputFile = TFile::Open(inputPath.c_str(), "READ");
@@ -253,8 +265,8 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
   }
 
   // Build output path: output_dir/root/output_root
-  std::string outputPath = BuildOutputPath(cfg.output_dir(), "root", cfg.output_root());
-
+  std::string outputPath = BuildOutputPath(outname_base, "root", cfg.output_root());
+  
   // Create directory if needed
   size_t lastSlash = outputPath.find_last_of('/');
   if (lastSlash != std::string::npos) {
@@ -280,7 +292,10 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
   // Create output branches - per channel vectors
   int event = 0;
   std::vector<int> sensorID(cfg.n_channels());
+  std::vector<int> sensorCol(cfg.n_channels());
+  std::vector<int> sensorRow(cfg.n_channels());
   std::vector<int> stripID(cfg.n_channels());
+  std::vector<bool> isHorizontal(cfg.n_channels());
   std::vector<bool> hasSignal(cfg.n_channels());
   std::vector<float> baseline(cfg.n_channels());
   std::vector<float> rmsNoise(cfg.n_channels());
@@ -293,17 +308,26 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
   std::vector<float> peakTime(cfg.n_channels());
   std::vector<float> riseTime(cfg.n_channels());
   std::vector<float> slewRate(cfg.n_channels());
-
+  std::vector<float> jitterRMS(cfg.n_channels());
+  
   // Initialize sensor and strip IDs from config
   for (int ch = 0; ch < cfg.n_channels(); ++ch) {
-    sensorID[ch] = cfg.sensor_ids[ch];
-    stripID[ch] = cfg.strip_ids[ch];
+    sensorID[ch]  = cfg.sensor_ids[ch];
+    sensorCol[ch] = cfg.sensor_cols[ch];
+    sensorRow[ch] = cfg.sensor_rows[ch];
+    stripID[ch]   = cfg.strip_ids[ch];
+    // Check sensor orientation
+    isHorizontal[ch] = IsSensorHorizontal(sensorID[ch], cfg);
   }
-
+  
   auto defineScalarBranches = [&]() {
+    outputTree->Branch("nChannels", &nChannels);
     outputTree->Branch("event", &event);
     outputTree->Branch("sensorID", &sensorID);
+    outputTree->Branch("sensorCol", &sensorCol);
+    outputTree->Branch("sensorRow", &sensorRow);
     outputTree->Branch("stripID", &stripID);
+    outputTree->Branch("isHorizontal", &isHorizontal);
     outputTree->Branch("hasSignal", &hasSignal);
     outputTree->Branch("baseline", &baseline);
     outputTree->Branch("rmsNoise", &rmsNoise);
@@ -316,6 +340,7 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
     outputTree->Branch("peakTime", &peakTime);
     outputTree->Branch("riseTime", &riseTime);
     outputTree->Branch("slewRate", &slewRate);
+    outputTree->Branch("jitterRMS", &jitterRMS);
   };
 
   // Multi-threshold timing branches (per channel, per threshold)
@@ -474,7 +499,8 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
       peakTime[ch] = features.peakTime;
       riseTime[ch] = features.riseTime;
       slewRate[ch] = features.slewRate;
-
+      jitterRMS[ch] = features.jitterRMS;
+      
       for (size_t i = 0; i < nCFD && i < features.timeCFD.size(); ++i) {
         timeCFD[ch][i] = features.timeCFD[i];
         jitterCFD[ch][i] = features.jitterCFD[i];
@@ -501,14 +527,20 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
     // Create 2D histograms for each sensor showing signal amplitudes
     if (waveformPlotsFile || qualityCheckFile) {
       // Determine which sensors are present and how many strips each has
-      std::map<int, std::vector<int>> sensorStrips;  // sensor ID -> list of strip IDs
+      std::map<int, std::vector<int>> sensorStrips;   // sensor ID -> list of strip IDs
       std::map<int, std::vector<int>> sensorChannels; // sensor ID -> list of channel indices
+      std::map<int, std::vector<int>> sensorCols;     // sensor ID -> list of colum indices
+      std::map<int, std::vector<int>> sensorRows;     // sensor ID -> list of row indices
 
       for (int ch = 0; ch < cfg.n_channels(); ++ch) {
         int sensorID = cfg.sensor_ids[ch];
-        int stripID = cfg.strip_ids[ch];
+	int sensorCol= cfg.sensor_cols[ch];
+	int sensorRow= cfg.sensor_rows[ch];
+	int stripID = cfg.strip_ids[ch];
         sensorStrips[sensorID].push_back(stripID);
         sensorChannels[sensorID].push_back(ch);
+	sensorCols[sensorID].push_back(sensorCol);
+	sensorRows[sensorID].push_back(sensorRow);
       }
 
       // Create event directory if not exists (for waveformPlotsFile)
@@ -526,84 +558,80 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
       std::map<int, TH2F*> sensorHistograms;
 
       // Create histogram for each sensor
-      for (const auto &sensorPair : sensorStrips) {
+      for (const auto &sensorPair : sensorChannels) {
         int sensorID = sensorPair.first;
         const std::vector<int> &strips = sensorPair.second;
         const std::vector<int> &channels = sensorChannels[sensorID];
-
+	
         // Find strip range
         int minStrip = *std::min_element(strips.begin(), strips.end());
         int maxStrip = *std::max_element(strips.begin(), strips.end());
-        int nStrips = maxStrip - minStrip + 1;
+        //int nStrips = maxStrip - minStrip + 1;
 
-        // Check sensor orientation
+	// Check sensor orientation
         bool isHorizontal = IsSensorHorizontal(sensorID, cfg);
-
+	
         TH2F *hist = nullptr;
 
-        if (isHorizontal) {
-          // Horizontal: X=strips, Y=1 bin (rotated 90 degrees)
-          hist = new TH2F(Form("sensor%02d_amplitude_map", sensorID),
-                          Form("Event %d - Sensor %02d Amplitude Map;Strip;Y;Amplitude (V)",
-                               eventIdx, sensorID),
-                          nStrips, minStrip, maxStrip + 1,  // X axis: strips
-                          1, 0, 1);  // Y axis: single bin
-        } else {
+        if (isHorizontal) {	  
           // Vertical: X=1 bin, Y=strips (current behavior)
           hist = new TH2F(Form("sensor%02d_amplitude_map", sensorID),
                           Form("Event %d - Sensor %02d Amplitude Map;X;Strip;Amplitude (V)",
                                eventIdx, sensorID),
-                          1, 0, 1,  // X axis: single bin
-                          nStrips, minStrip, maxStrip + 1);  // Y axis: strips
+                          2, 0, 2,  // X axis: single bin
+                          64, 0, 64);  // Y axis: strips
+	} else {
+	  // Horizontal: X=strips, Y=1 bin (rotated 90 degrees)
+          hist = new TH2F(Form("sensor%02d_amplitude_map", sensorID),
+                          Form("Event %d - Sensor %02d Amplitude Map;Strip;Y;Amplitude (V)",
+                               eventIdx, sensorID),
+                          64, 0, 64,  // X axis: strips
+                          2, 0, 2);  // Y axis: single bin
         }
-
+	
+	std::vector<float> weight_col_pos;
+	
         // Fill histogram with amplitude values
         for (size_t i = 0; i < channels.size(); ++i) {
           int ch = channels[i];
-          int stripID = strips[i];
-          float amplitude = ampMax[ch];
-
-          if (isHorizontal) {
-            hist->Fill(stripID, 0.5, amplitude);  // X=stripID, Y=0.5
-          } else {
-            hist->Fill(0.5, stripID, amplitude);  // X=0.5, Y=stripID
-          }
+          //int stripID = strips[i];	  
+	  float amplitude = ampMax[ch];
+	  if (isHorizontal)
+	    hist->Fill(sensorRow[i], sensorCol[i], amplitude);
+	  else
+	    hist->Fill(sensorCol[i], sensorRow[i], amplitude);
         }
-
+	
         // Save to sensor directory within event (for waveformPlotsFile)
         if (waveformPlotsFile && eventDir) {
           TDirectory *sensorDir = eventDir->GetDirectory(Form("sensor%02d", sensorID));
           if (!sensorDir) {
             sensorDir = eventDir->mkdir(Form("sensor%02d", sensorID));
           }
-          sensorDir->cd();
-          hist->Write(hist->GetName(), TObject::kOverwrite);
-        }
-
-        // Store histogram for quality check canvas
-        sensorHistograms[sensorID] = hist;
+          sensorDir->cd();	  
+	  hist->Write(hist->GetName(), TObject::kOverwrite);
+	}
+        // Store histogram for quality check canvas	
+	sensorHistograms[sensorID] = hist;
       }
-
       // Create quality check canvas with all 4 sensors
-      if (qualityCheckFile && sensorHistograms.size() >= 4) {
+      if (qualityCheckFile) {
         qualityCheckFile->cd();
-
         // Create canvas with 4 columns (1x4 layout)
         char canvasName[64];
         std::snprintf(canvasName, sizeof(canvasName), "event_%06d_quality_check", eventIdx);
-        TCanvas *canvas = new TCanvas(canvasName,
+	TCanvas *canvas = new TCanvas(canvasName,
                                       Form("Event %d - All Sensors Quality Check", eventIdx),
-                                      2400, 600);  // Wide canvas for 4 columns
-        canvas->Divide(4, 1);  // 4 columns, 1 row
-
-        // Draw each sensor in its own pad (sensors 1-4)
-        for (int sensorID = 1; sensorID <= 4; ++sensorID) {
-          canvas->cd(sensorID);  // Move to pad sensorID
-
-          auto it = sensorHistograms.find(sensorID);
-          if (it != sensorHistograms.end()) {
-            // Clone the histogram to avoid deletion issues
-            TH2F *histClone = (TH2F*)it->second->Clone(Form("sensor%02d_qc_clone", sensorID));
+                                      2400, 800);  // Wide canvas for 4 columns
+        canvas->Divide(3, 1);  // 4 columns, 1 row
+	
+        // Draw each sensor in its own pad (sensors 0-4(maximum sensor number))
+        for (int sensorID = 0; sensorID < 4; ++sensorID) {
+          canvas->cd(sensorID+1);  // Move to pad sensorID	  
+	  auto it = sensorHistograms.find(sensorID);	  
+	  if (it != sensorHistograms.end()) {
+	    // Clone the histogram to avoid deletion issues
+	    TH2F *histClone = (TH2F*)it->second->Clone(Form("sensor%02d_qc_clone", sensorID));
             histClone->SetStats(0);  // Hide statistics box
             histClone->Draw("COLZ");  // Draw with color scale
           } else {
@@ -616,7 +644,7 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
             emptyHist->Draw("COLZ");
           }
         }
-
+	
         // Save canvas to quality check file
         canvas->Write(canvasName, TObject::kOverwrite);
         delete canvas;  // Canvas deletion will handle cloned histograms
@@ -685,7 +713,7 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
     std::cout << "Quality check output saved to " << finalFileName << std::endl;
   }
 
-  std::string outputFullPath = BuildOutputPath(cfg.output_dir(), "root", cfg.output_root());
+  std::string outputFullPath = BuildOutputPath(outname_base, "root", cfg.output_root());
   std::cout << "Analysis complete. Output written to " << outputFullPath << std::endl;
   return true;
 }
@@ -715,7 +743,7 @@ int main(int argc, char **argv) {
   if (LoadAnalysisConfigFromJson(defaultPath, cfg, &err)) {
     std::cout << "Loaded configuration from " << defaultPath << std::endl;
   }
-
+  
   // Event range parameters
   Long64_t eventStart = -1;
   Long64_t eventEnd = -1;

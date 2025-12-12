@@ -17,11 +17,19 @@
 #include "config/wave_converter_config.h"
 #include "utils/file_io.h"
 
+using namespace std;
+
 namespace {
 
 enum class NsamplesPolicy { kStrict, kPad };
 enum class EventPolicy { kError, kWarn, kSkip };
 
+std::string to6digits(int n) {
+    std::ostringstream oss;
+    oss << std::setw(6) << std::setfill('0') << n;
+    return oss.str();
+}
+  
 bool kSetEventLimit = false;
 
 void CheckEventLimit(const WaveConverterConfig &cfg){
@@ -66,8 +74,7 @@ EventPolicy ResolveEventPolicy(const std::string &policyText) {
 std::string BuildFileName(const WaveConverterConfig &cfg, int ch) {
   const bool canOverride =
       cfg.enable_special_override && !cfg.special_channel_file.empty() &&
-      cfg.special_channel_index >= 0 && cfg.special_channel_index < cfg.n_channels();
-
+      cfg.special_channel_index >= 0 && cfg.special_channel_index < cfg.n_channels();  
   if (canOverride && ch == cfg.special_channel_index) {
     if (!cfg.special_channel_file.empty() && cfg.special_channel_file[0] == '/') {
       return cfg.special_channel_file;
@@ -76,21 +83,24 @@ std::string BuildFileName(const WaveConverterConfig &cfg, int ch) {
       std::string dir = cfg.input_dir;
       if (dir.back() != '/') {
         dir += '/';
+	dir += to6digits(cfg.runnumber())+'/';
+	dir += cfg.daq_name()+'/';
       }
       return dir + cfg.special_channel_file;
     }
     return cfg.special_channel_file;
   }
-
+  
   char fname[512];
-  std::snprintf(fname, sizeof(fname), cfg.input_pattern.c_str(), ch);
-
+  std::snprintf(fname, sizeof(fname), cfg.input_pattern.c_str(), ch);  
   std::string filename(fname);
   if (!cfg.input_dir.empty() && (filename.empty() || filename[0] != '/')) {
     std::string dir = cfg.input_dir;
     if (dir.back() != '/') {
       dir += '/';
     }
+    dir += to6digits(cfg.runnumber())+'/';
+    dir += cfg.daq_name()+'/';
     return dir + filename;
   }
   return filename;
@@ -114,7 +124,11 @@ bool EnsureParentDirectory(const std::string &path) {
 }
 
 bool ConvertBinaryToRoot(const WaveConverterConfig &cfg) {
-  std::string outputPath = BuildOutputPath(cfg.output_dir(), "root", cfg.root_file());
+  string outname_base = cfg.output_dir()+'/';
+  outname_base += to6digits(cfg.runnumber())+'/';
+  outname_base += cfg.daq_name()+"/output/";
+  
+  std::string outputPath = BuildOutputPath(outname_base, "root", cfg.root_file());
   if (!EnsureParentDirectory(outputPath)) {
     return false;
   }
@@ -448,11 +462,15 @@ bool ConvertBinaryToRoot(const WaveConverterConfig &cfg) {
 }
 
 bool ConvertBinaryToRootParallel(const WaveConverterConfig &cfg) {
-  std::string outputPath = BuildOutputPath(cfg.output_dir(), "root", cfg.root_file());
+  string outname_base = cfg.output_dir()+'/';
+  outname_base += to6digits(cfg.runnumber())+'/';
+  outname_base += cfg.daq_name()+"/output/";
+
+  std::string outputPath = BuildOutputPath(outname_base, "root", cfg.root_file());
   if (!EnsureParentDirectory(outputPath)) {
     return false;
   }
-
+  
   TFile *file = TFile::Open(outputPath.c_str(), "RECREATE");
   if (!file || file->IsZombie()) {
     std::cerr << "ERROR: cannot create ROOT file " << outputPath << std::endl;
@@ -796,7 +814,10 @@ bool ConvertBinaryToRootParallel(const WaveConverterConfig &cfg) {
 }
 
 bool ConvertAsciiToRoot(const WaveConverterConfig &cfg) {
-  std::string outputPath = BuildOutputPath(cfg.output_dir(), "root", cfg.root_file());
+  string outname_base = cfg.output_dir()+'/';
+  outname_base += to6digits(cfg.runnumber())+'/';
+  outname_base += cfg.daq_name()+"/output/";  
+  std::string outputPath = BuildOutputPath(outname_base, "root", cfg.root_file());
   if (!EnsureParentDirectory(outputPath)) {
     return false;
   }
@@ -1054,7 +1075,8 @@ void PrintUsage(const char *prog) {
             << "Usage: " << prog << " [options]\n"
             << "Options:\n"
             << "  --config PATH       Load settings from JSON file\n"
-            << "  --pattern PATTERN   Override input filename pattern\n"
+	    << "  --runnumber N       Override input runnumber\n"
+	    << "  --pattern PATTERN   Override input filename pattern\n"
             << "  --channels N        Override number of channels\n"
             << "  --root FILE         Override ROOT output file\n"
             << "  --nsamples-policy POLICY  nsamples handling: 'strict' or 'pad'\n"

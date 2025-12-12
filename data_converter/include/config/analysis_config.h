@@ -13,8 +13,12 @@ struct AnalysisConfig {
   CommonConfig common;
   // Accessors for shared fields
   std::string output_dir() const { return common.output_dir; }
+  std::string input_dir()  const { return common.input_dir; }
+  std::string daq_name()   const { return common.daq_name; }
+  int runnumber()  const { return common.runnumber; }
   int n_channels() const { return common.n_channels; }
-  int max_cores() const { return common.max_cores; }
+  int n_sensors()  const { return common.n_sensors; }
+  int max_cores()  const { return common.max_cores; }
   int chunk_size() const { return common.chunk_size; }
   std::string temp_dir() const { return common.temp_dir; }
   std::string input_root() const { return common.waveforms_root; }
@@ -22,6 +26,7 @@ struct AnalysisConfig {
   std::string output_root() const { return common.analysis_root; }
   std::string output_tree() const { return common.analysis_tree; }
   void set_n_channels(int v) { common.n_channels = v; }
+  void set_n_sensors(int v)  { common.n_sensors  = v; }
   void set_input_root(const std::string &v) { common.waveforms_root = v; }
   void set_output_root(const std::string &v) { common.analysis_root = v; }
   void set_input_tree(const std::string &v) { common.waveforms_tree = v; }
@@ -74,9 +79,11 @@ struct AnalysisConfig {
 
   // Sensor mapping (per channel)
   std::vector<int> sensor_ids;  // Which sensor each channel belongs to
+  std::vector<int> sensor_cols; // Strip columns
+  std::vector<int> sensor_rows; // Strip rows
   std::vector<int> strip_ids;   // Strip number within sensor
   std::vector<std::string> sensor_orientations;  // "vertical" or "horizontal" per sensor
-
+  
   // Constructor with default values
   AnalysisConfig() {
     // Initialize per-channel vectors with default values
@@ -92,8 +99,10 @@ struct AnalysisConfig {
     signal_polarity.assign(common.n_channels, 1);  // Default: positive signals
 
     // Default sensor mapping: ch0-7 = sensor 1, ch8-15 = sensor 2
-    sensor_ids = {1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2};
-    strip_ids = {0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7};
+    sensor_ids      = {1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2};
+    sensor_cols     = {28, 29, 30, 31, 32, 33, 34, 35, 28, 29, 30, 31, 32, 33, 34, 35};
+    sensor_rows     = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1};
+    strip_ids       = {0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7};
     sensor_orientations = {"vertical", "vertical"};  // Default: all vertical (local sensors)
   }
 };
@@ -114,9 +123,21 @@ inline bool LoadAnalysisConfigFromJson(const std::string &path,
 
     if (GetString(common, "output_dir", strValue)) {
       cfg.common.output_dir = strValue;
-    }
+    }    
+    if (GetString(common, "input_dir", strValue)) {
+      cfg.common.input_dir = strValue;
+    }    
+    if (GetString(common, "daq_name", strValue)) {
+      cfg.common.daq_name = strValue;
+    }    
+    if (GetNumber(common, "runnumber", numValue)) {
+      cfg.common.runnumber = static_cast<int>(numValue);
+    }    
     if (GetNumber(common, "n_channels", numValue)) {
       cfg.common.n_channels = static_cast<int>(numValue);
+    }
+    if (GetNumber(common, "n_sensors", numValue)) {
+      cfg.common.n_sensors = static_cast<int>(numValue);
     }
     if (GetNumber(common, "max_cores", numValue)) {
       cfg.common.max_cores = static_cast<int>(numValue);
@@ -193,7 +214,9 @@ inline bool LoadAnalysisConfigFromJson(const std::string &path,
     if (GetObject(waveformAnalyzer, "sensor_mapping", sensorSection)) {
       GetIntArray(sensorSection, "sensor_ids", cfg.sensor_ids);
       GetIntArray(sensorSection, "strip_ids", cfg.strip_ids);
-
+      GetIntArray(sensorSection, "sensor_cols", cfg.sensor_cols);
+      GetIntArray(sensorSection, "sensor_rows", cfg.sensor_rows);
+      
       // Parse sensor orientations
       simdjson::dom::array orientationsArray;
       if (sensorSection["sensor_orientations"].get(orientationsArray) == simdjson::SUCCESS) {
@@ -243,6 +266,8 @@ inline bool LoadAnalysisConfigFromJson(const std::string &path,
   // Ensure sensor mapping vectors have correct size
   if (cfg.sensor_ids.size() < static_cast<size_t>(cfg.common.n_channels)) {
     cfg.sensor_ids.resize(cfg.common.n_channels);
+    cfg.sensor_cols.resize(cfg.common.n_channels);
+    cfg.sensor_rows.resize(cfg.common.n_channels);
     cfg.strip_ids.resize(cfg.common.n_channels);
     // Set default mapping if not specified
     for (int i = 0; i < cfg.common.n_channels; ++i) {

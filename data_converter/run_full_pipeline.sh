@@ -143,7 +143,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --parallel)
-            USE_PARALLEL=true
+            USE_PARALLEL=false
             shift
             ;;
         --verbose)
@@ -210,6 +210,15 @@ EOF
     esac
 fi
 
+
+daq_name=$(sed -nE 's/^[[:space:]]*"daq_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$PIPELINE_CONFIG" | head -n1)
+runnumber=$(sed -nE 's/^[[:space:]]*"runnumber"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$PIPELINE_CONFIG" | head -n1)
+output_dir=$(sed -nE 's/^[[:space:]]*"output_dir"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$PIPELINE_CONFIG" | head -n1)
+
+run_str=$(printf "%06d" "$runnumber")
+
+OUTPUT_DIR="${output_dir}/${run_str}/${daq_name}"
+
 # Check ROOT environment
 if ! command -v root-config &> /dev/null; then
     echo "ERROR: ROOT not found. Please source ROOT environment:"
@@ -247,8 +256,8 @@ echo ""
 if [ "$RUN_STAGE1" = true ]; then
     echo "Stage 1: Converting waveforms to ROOT format..."
     echo "  Config: $PIPELINE_CONFIG"
-    echo "  Output: $OUTPUT_DIR/root/$RAW_ROOT"
-
+    echo "  Output: $OUTPUT_DIR/output/root/$RAW_ROOT"
+    
     if [ "$USE_PARALLEL" = true ]; then
         echo "  Mode:   PARALLEL"
     else
@@ -280,11 +289,11 @@ fi
 if [ "$RUN_STAGE2" = true ]; then
     echo "Stage 2: Analyzing waveforms..."
     echo "  Config: $PIPELINE_CONFIG"
-    echo "  Input:  $OUTPUT_DIR/root/$RAW_ROOT"
-    echo "  Output: $OUTPUT_DIR/root/$ANALYSIS_ROOT"
-
+    echo "  Input:  $OUTPUT_DIR/output/root/$RAW_ROOT"
+    echo "  Output: $OUTPUT_DIR/output/root/$ANALYSIS_ROOT"
+    
     # Check for input file (it should be in output_dir/root/)
-    if [ ! -f "$OUTPUT_DIR/root/$RAW_ROOT" ]; then
+    if [ ! -f "$OUTPUT_DIR/output/root/$RAW_ROOT" ]; then
         echo "ERROR: Input file $OUTPUT_DIR/root/$RAW_ROOT not found"
         echo "Please run stage 1 first or specify correct input file"
         exit 1
@@ -302,7 +311,7 @@ if [ "$RUN_STAGE2" = true ]; then
 
         "${SCRIPT_DIR}/parallel_analyze.sh" --config "$PIPELINE_CONFIG" --input "$RAW_ROOT" --output "$ANALYSIS_ROOT"
 
-        if [ $? -ne 0 ]; then
+	if [ $? -ne 0 ]; then
             echo "ERROR: Stage 2 (parallel) failed"
             exit 1
         fi
@@ -405,10 +414,10 @@ echo "Pipeline completed successfully!"
 echo "=========================================="
 echo ""
 echo "Output files:"
-if [ -f "$OUTPUT_DIR/root/$RAW_ROOT" ]; then
+if [ -f "$OUTPUT_DIR/output/root/$RAW_ROOT" ]; then
     echo "  Raw ROOT:        $OUTPUT_DIR/root/$RAW_ROOT"
 fi
-if [ -f "$OUTPUT_DIR/root/$ANALYSIS_ROOT" ]; then
+if [ -f "$OUTPUT_DIR/output/root/$ANALYSIS_ROOT" ]; then
     echo "  Analysis ROOT:   $OUTPUT_DIR/root/$ANALYSIS_ROOT"
 fi
 

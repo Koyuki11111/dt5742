@@ -12,9 +12,11 @@ struct WaveConverterConfig {
   CommonConfig common;
 
   // Accessors for common fields
-  std::string output_dir() const { return common.output_dir; }
+  std::string output_dir() const { return common.output_dir; }  
+  std::string daq_name()   const { return common.daq_name; }
+  int runnumber () const { return common.runnumber; }
   int n_channels() const { return common.n_channels; }
-  int max_cores() const { return common.max_cores; }
+  int max_cores()  const { return common.max_cores; }
   int max_events() const { return common.max_events; }
   int chunk_size() const { return common.chunk_size; }
   std::string temp_dir() const { return common.temp_dir; }
@@ -33,6 +35,7 @@ struct WaveConverterConfig {
   std::string special_channel_file = "TR_0_0.dat";
   bool enable_special_override = true;
   int special_channel_index = 3;
+  //int runnumber = 1;
   double tsample_ns = 0.2;
   int pedestal_window = 100;
   double ped_target = 3500.0;
@@ -56,8 +59,14 @@ inline bool LoadConfigFromJson(const std::string &path,
     if (GetString(common, "output_dir", strValue)) {
       cfg.common.output_dir = strValue;
     }
+    if (GetString(common, "daq_name", strValue)) {
+      cfg.common.daq_name = strValue;
+    }
     if (GetNumber(common, "n_channels", numValue)) {
       cfg.common.n_channels = static_cast<int>(numValue);
+    }
+    if (GetNumber(common, "runnumber", numValue)) {
+      cfg.common.runnumber = static_cast<int>(numValue);
     }
     if (GetNumber(common, "max_cores", numValue)) {
       cfg.common.max_cores = static_cast<int>(numValue);
@@ -106,6 +115,11 @@ inline bool LoadConfigFromJson(const std::string &path,
     if (GetNumber(waveformConverter, "special_channel_index", numValue)) {
       cfg.special_channel_index = static_cast<int>(numValue);
     }
+    /*
+    if (GetNumber(waveformConverter, "runnumber", numValue)) {
+      cfg.runnumber = static_cast<int>(numValue);
+    }
+    */
     if (GetString(waveformConverter, "event_policy", strValue)) {
       cfg.event_policy = strValue;
     }
