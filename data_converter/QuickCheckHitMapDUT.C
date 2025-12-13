@@ -166,6 +166,7 @@ void QuickCheckHitMapDUT(int runnumber=1){
   for (int sens1=0; sens1<4; sens1++) {
     for (int sens2=0; sens2<4; sens2++) {
       hist_diff_cfd_time[sens1][sens2] = new TH1F(Form("hist_diff_cfd_time_sensor%d_sensor%d",sens1,sens2),"",1000,0,100);
+      hist_diff_cfd_time[sens1][sens2]->SetTitle(";#Delta CFD(50pc); Entries");
     }
   }
   
@@ -398,7 +399,8 @@ void QuickCheckHitMapDUT(int runnumber=1){
   gPad->SetLogy(1);
   hist_all_amp->Draw("");
   hist_max_amp->Draw("same");
-  cout<<hist_max_amp->Integral()<<endl;
+  c2->cd(4);
+  hist_diff_cfd_time[0][1]->Draw("");
   cout<<"The number of Horizontal Sensor = "<<numH<<endl;
   cout<<"The number of Vertical Sensor = "<<numV<<endl;
 }
