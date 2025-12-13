@@ -58,16 +58,16 @@ def create_folder_structure(run_identifier):
             print("Aborting.")
             sys.exit(1)
 
+    daq00_path = os.path.join(base_path, "daq00")
     daq01_path = os.path.join(base_path, "daq01")
-    daq02_path = os.path.join(base_path, "daq02")
 
     # Create directories
+    os.makedirs(daq00_path, exist_ok=True)
     os.makedirs(daq01_path, exist_ok=True)
-    os.makedirs(daq02_path, exist_ok=True)
 
     print(f"Created folder structure: {base_path}")
+    print(f"  - {daq00_path}")
     print(f"  - {daq01_path}")
-    print(f"  - {daq02_path}")
 
     return base_path
 
@@ -102,7 +102,7 @@ def setup_tmux_session(base_path):
     Layout:
     ┌─────────────┬─────────────┐
     │             │             │
-    │ DAQ01       │ DAQ02       │
+    │ DAQ00       │ DAQ01       │
     │             │             │
     ├─────┬───────┤             │
     │Mon1 │       │             │
@@ -114,24 +114,33 @@ def setup_tmux_session(base_path):
         base_path: Base path to data folder
     """
     session_name = "caen_daq"
+    daq00_path = os.path.join(base_path, "daq00")
     daq01_path = os.path.join(base_path, "daq01")
-    daq02_path = os.path.join(base_path, "daq02")
 
     # Copy config files using Python (to avoid race conditions with tmux)
     # Copy WaveDump configs
-    shutil.copy('/opt/WaveDumpConfig_USB0.txt', os.path.join(daq01_path, 'WaveDumpConfig_USB0.txt'))
-    shutil.copy('/opt/WaveDumpConfig_USB1.txt', os.path.join(daq02_path, 'WaveDumpConfig_USB1.txt'))
+    shutil.copy(
+        args.wavedump_usb0,
+        os.path.join(daq00_path, 'WaveDumpConfig_USB0.txt')
+    )
+
+    shutil.copy(
+        args.wavedump_usb1,
+        os.path.join(daq01_path, 'WaveDumpConfig_USB1.txt')
+    )    
+    #shutil.copy('/opt/WaveDumpConfig_USB0.txt', os.path.join(daq00_path, 'WaveDumpConfig_USB0.txt'))
+    #shutil.copy('/opt/WaveDumpConfig_USB1.txt', os.path.join(daq01_path, 'WaveDumpConfig_USB1.txt'))
     print(f"Copied WaveDump config files")
 
     # Copy and update monitor configs
-    config_path_01 = os.path.join(daq01_path, 'monitor_config.json')
-    config_path_02 = os.path.join(daq02_path, 'monitor_config.json')
+    config_path_01 = os.path.join(daq00_path, 'monitor_config.json')
+    config_path_02 = os.path.join(daq01_path, 'monitor_config.json')
 
     shutil.copy('/opt/dt5742/daq_monitor/monitor_config.json', config_path_01)
-    update_monitor_config(config_path_01, daq01_path, '01')
+    update_monitor_config(config_path_01, daq00_path, '00')
 
     shutil.copy('/opt/dt5742/daq_monitor/monitor_config.json', config_path_02)
-    update_monitor_config(config_path_02, daq02_path, '02')
+    update_monitor_config(config_path_02, daq01_path, '01')
 
     # Create new tmux session and get the initial pane ID
     result = subprocess.run(
@@ -154,7 +163,7 @@ def setup_tmux_session(base_path):
         capture_output=True, text=True
     )
     pane_left_bottom = result.stdout.strip()  # Left bottom (monitor area)
-    pane_left_top = pane_left  # Left top (DAQ01)
+    pane_left_top = pane_left  # Left top (DAQ00)
 
     # Split left bottom into two monitors (Monitor1 | Monitor2)
     result = subprocess.run(
@@ -164,43 +173,43 @@ def setup_tmux_session(base_path):
     pane_monitor2 = result.stdout.strip()  # Monitor2 (bottom)
     pane_monitor1 = pane_left_bottom  # Monitor1 (top)
 
-    # Now split RIGHT side vertically (DAQ02 top | glances bottom)
+    # Now split RIGHT side vertically (DAQ01 top | glances bottom)
     result = subprocess.run(
         ['tmux', 'split-window', '-v', '-t', pane_right, '-P', '-F', '#{pane_id}'],
         capture_output=True, text=True
     )
     pane_glances = result.stdout.strip()  # glances (right bottom)
-    pane_right_top = pane_right  # DAQ02 (right top)
+    pane_right_top = pane_right  # DAQ01 (right top)
 
     # Resize panes to match heights - DAQ panes should be larger
-    # Resize left top (DAQ01) to 60% of left column
+    # Resize left top (DAQ00) to 60% of left column
     subprocess.run(['tmux', 'resize-pane', '-t', pane_left_top, '-y', '60%'])
-    # Resize right top (DAQ02) to 60% of right column
+    # Resize right top (DAQ01) to 60% of right column
     subprocess.run(['tmux', 'resize-pane', '-t', pane_right_top, '-y', '60%'])
 
-    # Configure DAQ01 pane (top-left)
+    # Configure DAQ00 pane (top-left)
     subprocess.run(['tmux', 'send-keys', '-t', pane_left_top,
-                   f'cd {daq01_path} && wavedump WaveDumpConfig_USB0.txt', 'C-m'])
+                   f'cd {daq00_path} && wavedump WaveDumpConfig_USB0.txt', 'C-m'])
+
+    # Wait for DAQ00 to initialize
+    print("Starting DAQ00...")
+    time.sleep(1)
+
+    # Configure DAQ01 pane (top-right)
+    subprocess.run(['tmux', 'send-keys', '-t', pane_right_top,
+                   f'cd {daq01_path} && wavedump WaveDumpConfig_USB1.txt', 'C-m'])
 
     # Wait for DAQ01 to initialize
     print("Starting DAQ01...")
     time.sleep(1)
 
-    # Configure DAQ02 pane (top-right)
-    subprocess.run(['tmux', 'send-keys', '-t', pane_right_top,
-                   f'cd {daq02_path} && wavedump WaveDumpConfig_USB1.txt', 'C-m'])
-
-    # Wait for DAQ02 to initialize
-    print("Starting DAQ02...")
-    time.sleep(1)
-
     # Configure Monitor1 pane (left-bottom-top)
     subprocess.run(['tmux', 'send-keys', '-t', pane_monitor1,
-                   f'cd {daq01_path} && /opt/dt5742/daq_monitor/monitor_realtime --config monitor_config.json', 'C-m'])
+                   f'cd {daq00_path} && /opt/dt5742/daq_monitor/monitor_realtime --config monitor_config.json', 'C-m'])
 
     # Configure Monitor2 pane (left-bottom-bottom)
     subprocess.run(['tmux', 'send-keys', '-t', pane_monitor2,
-                   f'cd {daq02_path} && /opt/dt5742/daq_monitor/monitor_realtime --config monitor_config.json', 'C-m'])
+                   f'cd {daq01_path} && /opt/dt5742/daq_monitor/monitor_realtime --config monitor_config.json', 'C-m'])
 
     # Configure glances pane (right-bottom)
     subprocess.run(['tmux', 'send-keys', '-t', pane_glances, 'glances', 'C-m'])
@@ -217,7 +226,10 @@ def main():
         'run_identifier',
         help='Run number (will be formatted as 6-digit) or folder name (string)'
     )
-
+    parser.add_argument("--wavedump-usb0", default="/opt/WaveDumpConfig_USB0.txt")
+    parser.add_argument("--wavedump-usb1", default="/opt/WaveDumpConfig_USB1.txt")
+    #parser.add_argument("--monitor-config", default="/opt/dt5742/daq_monitor/monitor_config.json")
+    
     args = parser.parse_args()
 
     session_name = "caen_daq"
@@ -244,7 +256,7 @@ def main():
 
     # Create folder structure
     base_path = create_folder_structure(args.run_identifier)
-
+    
     # Setup tmux session
     session_name = setup_tmux_session(base_path)
 
@@ -252,21 +264,21 @@ def main():
     time.sleep(1)
 
     # Display session info
+    daq00_path = os.path.join(base_path, "daq00")
     daq01_path = os.path.join(base_path, "daq01")
-    daq02_path = os.path.join(base_path, "daq02")
 
     print("\n" + "="*63)
     print(f"║         Tmux Session: {session_name} (5 panes)            ║")
     print(f"║         Working Directory: {base_path:<28}║")
     print("╠═════════════════════════════╦═════════════════════════════╣")
-    print("║  DAQ01 WaveDump             ║  DAQ02 WaveDump             ║")
+    print("║  DAQ00 WaveDump             ║  DAQ01 WaveDump             ║")
     print("║  Digitizer USB0             ║  Digitizer USB1             ║")
-    print(f"║  {daq01_path:<27}║  {daq02_path:<27}║")
+    print(f"║  {daq00_path:<27}║  {daq01_path:<27}║")
     print("╠═════════════════════════════╬═════════════════════════════╣")
-    print("║  DAQ01 Monitor              ║                             ║")
+    print("║  DAQ00 Monitor              ║                             ║")
     print("║  Real-time Analysis         ║  System Monitor             ║")
     print("╟─────────────────────────────╢  glances                    ║")
-    print("║  DAQ02 Monitor              ║                             ║")
+    print("║  DAQ01 Monitor              ║                             ║")
     print("║  Real-time Analysis         ║                             ║")
     print("="*63)
     print("\nPress ENTER to attach to tmux session...")
