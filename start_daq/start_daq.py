@@ -96,7 +96,7 @@ def update_monitor_config(config_path, daq_path, daq_number):
     print(f"Updated config file: {config_path}")
 
 
-def setup_tmux_session(base_path):
+def setup_tmux_session(base_path, args):
     """Setup tmux session with panes for DAQ operations
 
     Layout:
@@ -258,7 +258,7 @@ def main():
     base_path = create_folder_structure(args.run_identifier)
     
     # Setup tmux session
-    session_name = setup_tmux_session(base_path)
+    session_name = setup_tmux_session(base_path,args)
 
     # Wait for processes to start
     time.sleep(1)
