@@ -217,7 +217,8 @@ output_dir=$(sed -nE 's/^[[:space:]]*"output_dir"[[:space:]]*:[[:space:]]*"([^"]
 
 run_str=$(printf "%06d" "$runnumber")
 
-OUTPUT_DIR="${output_dir}/${run_str}/${daq_name}"
+BASE_DIR="${output_dir}/${run_str}/${daq_name}"
+OUTPUT_DIR=$BASE_DIR/output
 
 # Check ROOT environment
 if ! command -v root-config &> /dev/null; then
@@ -256,7 +257,7 @@ echo ""
 if [ "$RUN_STAGE1" = true ]; then
     echo "Stage 1: Converting waveforms to ROOT format..."
     echo "  Config: $PIPELINE_CONFIG"
-    echo "  Output: $OUTPUT_DIR/output/root/$RAW_ROOT"
+    echo "  Output: $OUTPUT_DIR/root/$RAW_ROOT"
     
     if [ "$USE_PARALLEL" = true ]; then
         echo "  Mode:   PARALLEL"
@@ -289,11 +290,11 @@ fi
 if [ "$RUN_STAGE2" = true ]; then
     echo "Stage 2: Analyzing waveforms..."
     echo "  Config: $PIPELINE_CONFIG"
-    echo "  Input:  $OUTPUT_DIR/output/root/$RAW_ROOT"
-    echo "  Output: $OUTPUT_DIR/output/root/$ANALYSIS_ROOT"
+    echo "  Input:  $OUTPUT_DIR/root/$RAW_ROOT"
+    echo "  Output: $OUTPUT_DIR/root/$ANALYSIS_ROOT"
     
     # Check for input file (it should be in output_dir/root/)
-    if [ ! -f "$OUTPUT_DIR/output/root/$RAW_ROOT" ]; then
+    if [ ! -f "$OUTPUT_DIR/root/$RAW_ROOT" ]; then
         echo "ERROR: Input file $OUTPUT_DIR/root/$RAW_ROOT not found"
         echo "Please run stage 1 first or specify correct input file"
         exit 1
@@ -381,7 +382,11 @@ except:
                 echo "  Exporting Corryvreckan Hits for sensor $SENSOR_ID..."
                 echo "    Input:  $OUTPUT_DIR/root/$ANALYSIS_ROOT"
                 echo "    Output: $OUTPUT_DIR/hdf5/$OUTPUT_FILE"
-
+		
+		echo "OUTPUT_DIR=" $OUTPUT_DIR
+		echo "ANALYSIS_ROOT=" $ANALYSIS_ROOT
+		echo "OUTPUT_FILE=" $OUTPUT_FILE
+		
                 "${SCRIPT_DIR}/export_to_hdf5" --mode corry --input "$ANALYSIS_ROOT" --tree Analysis \
                     --output "$OUTPUT_FILE" --output-dir "$OUTPUT_DIR" \
                     --sensor-id "$SENSOR_ID" --sensor-mapping "$PIPELINE_CONFIG" \
@@ -414,10 +419,10 @@ echo "Pipeline completed successfully!"
 echo "=========================================="
 echo ""
 echo "Output files:"
-if [ -f "$OUTPUT_DIR/output/root/$RAW_ROOT" ]; then
+if [ -f "$OUTPUT_DIR/root/$RAW_ROOT" ]; then
     echo "  Raw ROOT:        $OUTPUT_DIR/root/$RAW_ROOT"
 fi
-if [ -f "$OUTPUT_DIR/output/root/$ANALYSIS_ROOT" ]; then
+if [ -f "$OUTPUT_DIR/root/$ANALYSIS_ROOT" ]; then
     echo "  Analysis ROOT:   $OUTPUT_DIR/root/$ANALYSIS_ROOT"
 fi
 

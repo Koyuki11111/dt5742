@@ -78,7 +78,7 @@ def update_monitor_config(config_path, daq_path, daq_number):
     Args:
         config_path: Path to config file
         daq_path: Path to daq folder
-        daq_number: DAQ number (01 or 02)
+        daq_number: DAQ number (00 or 01)
     """
     with open(config_path, 'r') as f:
         config = json.load(f)
