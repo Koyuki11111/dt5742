@@ -79,9 +79,8 @@ struct AnalysisConfig {
 
   // Sensor mapping (per channel)
   std::vector<int> sensor_ids;  // Which sensor each channel belongs to
-  std::vector<int> sensor_cols; // Strip columns
-  std::vector<int> sensor_rows; // Strip rows
-  std::vector<int> strip_ids;   // Strip number within sensor
+  std::vector<int> sensor_cols; // Strip IDs (Unified name)
+  std::vector<int> sensor_rows; // Column IDs
   std::vector<std::string> sensor_orientations;  // "vertical" or "horizontal" per sensor
   
   // Constructor with default values
@@ -100,9 +99,10 @@ struct AnalysisConfig {
 
     // Default sensor mapping: ch0-7 = sensor 1, ch8-15 = sensor 2
     sensor_ids      = {1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2};
-    sensor_cols     = {28, 29, 30, 31, 32, 33, 34, 35, 28, 29, 30, 31, 32, 33, 34, 35};
-    sensor_rows     = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1};
-    strip_ids       = {0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7};
+    // Default strips 0-7
+    sensor_cols     = {0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7};
+    // Default columns (0)
+    sensor_rows     = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     sensor_orientations = {"vertical", "vertical"};  // Default: all vertical (local sensors)
   }
 };
@@ -213,9 +213,10 @@ inline bool LoadAnalysisConfigFromJson(const std::string &path,
     simdjson::dom::element sensorSection;
     if (GetObject(waveformAnalyzer, "sensor_mapping", sensorSection)) {
       GetIntArray(sensorSection, "sensor_ids", cfg.sensor_ids);
-      GetIntArray(sensorSection, "strip_ids", cfg.strip_ids);
-      GetIntArray(sensorSection, "sensor_cols", cfg.sensor_cols);
-      GetIntArray(sensorSection, "sensor_rows", cfg.sensor_rows);
+      // Unify: Read strip_ids into sensor_cols
+      GetIntArray(sensorSection, "strip_ids", cfg.sensor_cols);
+      // Map column_ids to sensor_rows
+      GetIntArray(sensorSection, "column_ids", cfg.sensor_rows);
       
       // Parse sensor orientations
       simdjson::dom::array orientationsArray;
@@ -268,17 +269,16 @@ inline bool LoadAnalysisConfigFromJson(const std::string &path,
     cfg.sensor_ids.resize(cfg.common.n_channels);
     cfg.sensor_cols.resize(cfg.common.n_channels);
     cfg.sensor_rows.resize(cfg.common.n_channels);
-    cfg.strip_ids.resize(cfg.common.n_channels);
     // Set default mapping if not specified
     for (int i = 0; i < cfg.common.n_channels; ++i) {
       cfg.sensor_ids[i] = (i < 8) ? 1 : 2;
-      cfg.strip_ids[i] = i % 8;
+      cfg.sensor_cols[i] = i % 8;
     }
   }
-  if (cfg.strip_ids.size() < static_cast<size_t>(cfg.common.n_channels)) {
-    cfg.strip_ids.resize(cfg.common.n_channels);
+  if (cfg.sensor_cols.size() < static_cast<size_t>(cfg.common.n_channels)) {
+    cfg.sensor_cols.resize(cfg.common.n_channels);
     for (int i = 0; i < cfg.common.n_channels; ++i) {
-      cfg.strip_ids[i] = i % 8;
+      cfg.sensor_cols[i] = i % 8;
     }
   }
 

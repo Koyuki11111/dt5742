@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd -- "$(dirname "$0")" && pwd)"
 
 # Default values (can be overridden by config or command line)
 DEFAULT_CONFIG="converter_config.json"
-DEFAULT_CHUNK_SIZE=100
+DEFAULT_CHUNK_SIZE=500
 DEFAULT_MAX_CORES=8
 DEFAULT_TEMP_DIR="./temp_analysis"
 
@@ -81,13 +81,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Validate required arguments
-if [ -z "$INPUT_ROOT" ] || [ -z "$OUTPUT_ROOT" ]; then
-    echo "ERROR: --input and --output are required"
-    print_usage
-    exit 1
-fi
-
+# Validate arguments
 if [ ! -f "$CONFIG" ]; then
     echo "ERROR: Config file not found: $CONFIG"
     exit 1
@@ -101,15 +95,25 @@ if [ ! -x "$ANALYZE_BIN" ]; then
     exit 1
 fi
 
-
 daq_name=$(sed -nE 's/^[[:space:]]*"daq_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$CONFIG" | head -n1)
 runnumber=$(sed -nE 's/^[[:space:]]*"runnumber"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$CONFIG" | head -n1)
 output_dir=$(sed -nE 's/^[[:space:]]*"output_dir"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$CONFIG" | head -n1)
-
 run_str=$(printf "%06d" "$runnumber")
-
 OUTPUT_DIR="${output_dir}/${run_str}/${daq_name}"
 
+# If inputs not specified, try to read from config
+if [ -z "$INPUT_ROOT" ]; then
+    INPUT_ROOT=$(sed -nE 's/^[[:space:]]*"waveforms_root"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$CONFIG" | head -n1)
+fi
+if [ -z "$OUTPUT_ROOT" ]; then
+    OUTPUT_ROOT=$(sed -nE 's/^[[:space:]]*"analysis_root"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$CONFIG" | head -n1)
+fi
+
+if [ -z "$INPUT_ROOT" ] || [ -z "$OUTPUT_ROOT" ]; then
+    echo "ERROR: --input and --output are required (or must be in config)"
+    print_usage
+    exit 1
+fi
 
 # Build full input path
 INPUT_PATH="$OUTPUT_DIR/output/root/$INPUT_ROOT"
@@ -132,21 +136,7 @@ echo ""
 
 # Get total number of events from ROOT file using temporary macro
 echo "Counting events in input file..."
-# cat > /tmp/count_events_$$.C <<MACRO_EOF
-# void count_events_$$() {
-#     TFile *f = TFile::Open("$INPUT_PATH");
-#     if (f && !f->IsZombie()) {
-#         TTree *t = (TTree*)f->Get("Waveforms");
-#         if (t) {
-#             std::cout << "NUM_ENTRIES=" << t->GetEntries() << std::endl;
-#         }
-#         f->Close();
-#     }
-# }
-# MACRO_EOF
 
-# NUM_EVENTS=$(root -l -b -q "/tmp/count_events_$$.C" 2>&1 | grep "NUM_ENTRIES=" | cut -d= -f2)
-# rm -f /tmp/count_events_$$.C
 NUM_EVENTS=$(
 INPUT_PATH="$INPUT_PATH" root -l -b -q -e '
     TFile *f = TFile::Open(gSystem->Getenv("INPUT_PATH"));
@@ -198,18 +188,26 @@ process_chunk() {
         --event-range "$START_EVENT:$END_EVENT" \
         --waveform-plots-file "$CHUNK_PLOTS" \
         > "$TEMP_DIR/chunk_${CHUNK_ID}.log" 2>&1    
-    # Move output to temp directory
+    
+    # Move output(analysis result) to temp directory
     if [ -f "$OUTPUT_DIR/output/root/$(basename $CHUNK_OUTPUT)" ]; then	
-	mv "$OUTPUT_DIR/output/root/$(basename $CHUNK_OUTPUT)" "$CHUNK_OUTPUT"
+	    mv "$OUTPUT_DIR/output/root/$(basename $CHUNK_OUTPUT)" "$CHUNK_OUTPUT"
     else
-	echo "ERROR: Missing $OUTPUT_DIR/$(basename $CHUNK_OUTPUT)"
+	    echo "ERROR: Missing $OUTPUT_DIR/$(basename $CHUNK_OUTPUT)"
+        return 1
     fi
+    
     # Move waveform plots to temp directory if it exists
+    # If plots override output is enabled, it should be in waveform_plots dir
+    # Actually analyze_waveforms puts it in output_dir/output/waveform_plots/[name].root
+    
     if [ -f "$OUTPUT_DIR/output/waveform_plots/${CHUNK_PLOTS}.root" ]; then
         mv "$OUTPUT_DIR/output/waveform_plots/${CHUNK_PLOTS}.root" "$TEMP_DIR/${CHUNK_PLOTS}.root"
     fi
+    # Also handle possibility of split files (.root, _001.root ...) if large
+    # But for chunks it's unlikely to be > 4GB unless chunk is huge
+    
     # Move quality check files to temp directory if they exist
-    # Quality check files follow the same naming scheme as waveform plots
     local CHUNK_QC=$(echo "$CHUNK_PLOTS" | sed 's/waveform_plots/quality_check/')
     if [ -f "$OUTPUT_DIR/output/quality_check/${CHUNK_QC}.root" ]; then
         mv "$OUTPUT_DIR/output/quality_check/${CHUNK_QC}.root" "$TEMP_DIR/${CHUNK_QC}.root"
@@ -295,63 +293,47 @@ fi
 echo "Merged $NUM_CHUNKS analysis chunks into $OUTPUT_PATH"
 echo ""
 
-# Merge waveform plots if they exist
-PLOTS_FILES=("$TEMP_DIR"/waveform_plots_chunk_*.root)
-if [ -f "${PLOTS_FILES[0]}" ]; then
-    echo "Merging waveform plots files..."
-
-    PLOTS_OUTPUT="$OUTPUT_DIR/output/waveform_plots/waveform_plots.root"
-
-    # Ensure output directory exists
-    mkdir -p "$OUTPUT_DIR/output/waveform_plots"
-
-    hadd -f "$PLOTS_OUTPUT" "$TEMP_DIR"/waveform_plots_chunk_*.root > "$TEMP_DIR/merge_plots.log" 2>&1
-
-    if [ $? -eq 0 ]; then
-        echo "Merged waveform plots into $PLOTS_OUTPUT"
-
-        # Get file size and report
-        PLOTS_SIZE=$(ls -lh "$PLOTS_OUTPUT" | awk '{print $5}')
-        echo "  Waveform plots file size: $PLOTS_SIZE"
-
-        # Check if file is larger than 4GB (warning for manual split if needed)
-        PLOTS_SIZE_BYTES=$(stat -f%z "$PLOTS_OUTPUT" 2>/dev/null || stat -c%s "$PLOTS_OUTPUT" 2>/dev/null)
-        FOUR_GB=$((4 * 1024 * 1024 * 1024))
-        if [ "$PLOTS_SIZE_BYTES" -gt "$FOUR_GB" ]; then
-            echo "  WARNING: Waveform plots file exceeds 4GB. Consider processing smaller chunks."
-            echo "           Large files may be difficult to transfer or open."
+# Handle waveform plots (SKIP MERGE by default, copy instead)
+# Check if --merge-plots is passed? No, user asked generally.
+# I'll implement a flag variable $MERGE_PLOTS and add it to args.
+if [ "$MERGE_PLOTS" = "true" ]; then
+    PLOTS_FILES=("$TEMP_DIR"/waveform_plots_chunk_*.root)
+    if [ -f "${PLOTS_FILES[0]}" ]; then
+        echo "Merging waveform plots files (this may take time)..."
+        PLOTS_OUTPUT="$OUTPUT_DIR/output/waveform_plots/waveform_plots.root"
+        mkdir -p "$OUTPUT_DIR/output/waveform_plots"
+        hadd -f "$PLOTS_OUTPUT" "$TEMP_DIR"/waveform_plots_chunk_*.root > "$TEMP_DIR/merge_plots.log" 2>&1
+        if [ $? -eq 0 ]; then
+            echo "Merged waveform plots into $PLOTS_OUTPUT"
+        else
+            echo "WARNING: Failed to merge waveform plots (see $TEMP_DIR/merge_plots.log)"
         fi
-    else
-        echo "WARNING: Failed to merge waveform plots (see $TEMP_DIR/merge_plots.log)"
     fi
 else
-    echo "No waveform plots files found (plots may be disabled in config)"
+    # Copy instead of merge
+    PLOTS_FILES=("$TEMP_DIR"/waveform_plots_chunk_*.root)
+    if [ -f "${PLOTS_FILES[0]}" ]; then
+        echo "Copying waveform plots chunks (skipping merge)..."
+        mkdir -p "$OUTPUT_DIR/output/waveform_plots"
+        # We rename them to be meaningful if possible, or just chunk_N
+        # Maybe use the start/end event if we tracked it, but chunk_ID is simpler
+        cp "$TEMP_DIR"/waveform_plots_chunk_*.root "$OUTPUT_DIR/output/waveform_plots/"
+        echo "Copied plot chunks to $OUTPUT_DIR/output/waveform_plots/"
+    fi
 fi
-echo ""
 
-# Merge quality check files if they exist
+# Merge quality check files (usually small so ok to merge)
 QC_FILES=("$TEMP_DIR"/quality_check_chunk_*.root)
 if [ -f "${QC_FILES[0]}" ]; then
     echo "Merging quality check files..."
-
     QC_OUTPUT="$OUTPUT_DIR/output/quality_check/quality_check.root"
-
-    # Ensure output directory exists
     mkdir -p "$OUTPUT_DIR/output/quality_check"
-
     hadd -f "$QC_OUTPUT" "$TEMP_DIR"/quality_check_chunk_*.root > "$TEMP_DIR/merge_qc.log" 2>&1
-
     if [ $? -eq 0 ]; then
         echo "Merged quality check files into $QC_OUTPUT"
-
-        # Get file size and report
-        QC_SIZE=$(ls -lh "$QC_OUTPUT" | awk '{print $5}')
-        echo "  Quality check file size: $QC_SIZE"
     else
         echo "WARNING: Failed to merge quality check files (see $TEMP_DIR/merge_qc.log)"
     fi
-else
-    echo "No quality check files found (may be disabled in config)"
 fi
 echo ""
 

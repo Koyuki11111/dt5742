@@ -6,10 +6,12 @@
 set -e  # Exit on error
 
 # Default configuration
-BASE_DATA_DIR="/data/test07"
-DAQ_NAMES=("daq01" "daq02")
+BASE_DATA_DIR="/home/blim/epic/data/000004"
+DAQ_NAMES=("daq00" "daq01")
 RUN_PARALLEL=false
 VERBOSE=false
+WITH_QA_COMPARISON=false
+NUM_QA_EVENTS=5
 POSITIONAL_ARGS=()
 
 # Resolve script directory to locate helper scripts even when invoked elsewhere
@@ -29,6 +31,8 @@ Options:
     --base-dir DIR           Base data directory containing daq01 and daq02 (default: /data/test07)
     --daq-names NAME1,NAME2  Comma-separated DAQ directory names (default: daq01,daq02)
     --parallel               Run both DAQs in parallel (instead of sequential)
+    --with-qa-comparison     Run QA comparison after processing (requires merged HDF5 directory)
+    --num-qa-events N        Number of events for QA comparison (default: 5)
     --verbose                Verbose output
     -h, --help               Show this help message
 
@@ -80,6 +84,14 @@ while [[ $# -gt 0 ]]; do
         --parallel)
             RUN_PARALLEL=true
             shift
+            ;;
+        --with-qa-comparison)
+            WITH_QA_COMPARISON=true
+            shift
+            ;;
+        --num-qa-events)
+            NUM_QA_EVENTS="$2"
+            shift 2
             ;;
         --verbose)
             VERBOSE=true
@@ -147,7 +159,7 @@ echo ""
 process_daq() {
     local daq_name=$1
     local daq_dir="${BASE_DATA_DIR}/${daq_name}"
-    local config_file="converter_config_${daq_name}.json"
+    local config_file="converter_config_${daq_name}_temp.json"
 
     echo "=========================================="
     echo "Processing: $daq_name"
@@ -162,9 +174,54 @@ process_daq() {
         return 1
     fi
 
-    # Create temporary config file for this DAQ
-    echo "Creating configuration for $daq_name..."
-    python3 - "$BASE_CONFIG" "$config_file" "$daq_dir" "$daq_name" <<'EOF'
+    # Check if fixed config file exists, otherwise create from base config
+    local fixed_config="${SCRIPT_DIR}/converter_config_${daq_name}.json"
+
+    if [ -f "$fixed_config" ]; then
+        echo "Using existing config: $fixed_config"
+        python3 - "$fixed_config" "$config_file" "$daq_dir" "$daq_name" <<'EOF'
+import json
+import sys
+import os
+
+fixed_config_file = sys.argv[1]
+output_config_file = sys.argv[2]
+daq_dir = sys.argv[3]
+daq_name = sys.argv[4]
+
+# Read fixed configuration
+with open(fixed_config_file, 'r') as f:
+    config = json.load(f)
+
+# Extract runnumber from daq_dir path
+# daq_dir format: /home/blim/epic/data/000004/daq00
+parts = daq_dir.rstrip('/').split('/')
+run_str = parts[-2] if len(parts) >= 2 else "000000"
+runnumber = int(run_str)
+base_data_dir = '/'.join(parts[:-2])
+
+# Update only runnumber (keep other settings from fixed config)
+config['common']['runnumber'] = runnumber
+
+# Ensure paths are set correctly
+if 'output_dir' not in config['common'] or not config['common']['output_dir']:
+    config['common']['output_dir'] = base_data_dir
+if 'daq_name' not in config['common'] or not config['common']['daq_name']:
+    config['common']['daq_name'] = daq_name
+if 'input_dir' not in config['waveform_converter'] or not config['waveform_converter']['input_dir']:
+    config['waveform_converter']['input_dir'] = base_data_dir
+
+# Write configuration for this run
+with open(output_config_file, 'w') as f:
+    json.dump(config, f, indent=2)
+
+print(f"  Loaded from: {os.path.basename(fixed_config_file)}")
+print(f"  runnumber: {config['common']['runnumber']}")
+print(f"  sensor_ids: {config.get('waveform_analyzer', {}).get('sensor_mapping', {}).get('sensor_ids', 'N/A')[:4]}...")
+EOF
+    else
+        echo "Creating new config from base: $BASE_CONFIG"
+        python3 - "$BASE_CONFIG" "$config_file" "$daq_dir" "$daq_name" "$fixed_config" <<'EOF'
 import json
 import sys
 
@@ -172,38 +229,55 @@ base_config_file = sys.argv[1]
 output_config_file = sys.argv[2]
 daq_dir = sys.argv[3]
 daq_name = sys.argv[4]
+fixed_config_file = sys.argv[5]
 
 # Read base configuration
 with open(base_config_file, 'r') as f:
     config = json.load(f)
 
-# Update paths for this DAQ
-config['common']['output_dir'] = f"{daq_dir}/output"
-config['waveform_converter']['input_dir'] = daq_dir
+# Extract runnumber from daq_dir path
+# daq_dir format: /home/blim/epic/data/000004/daq00
+parts = daq_dir.rstrip('/').split('/')
+run_str = parts[-2] if len(parts) >= 2 else "000000"
+runnumber = int(run_str)
+base_data_dir = '/'.join(parts[:-2])
 
-# Update sensor_ids based on DAQ name
-# DAQ01 (daq01): sensors 1,2 (channels 0-7: sensor 1, channels 8-15: sensor 2)
-# DAQ02 (daq02): sensors 3,4 (channels 0-7: sensor 3, channels 8-15: sensor 4)
+# Update paths using runnumber/daq_name pattern
+config['common']['output_dir'] = base_data_dir
+config['common']['runnumber'] = runnumber
+config['common']['daq_name'] = daq_name
+config['waveform_converter']['input_dir'] = base_data_dir
+
+# Update sensor mapping based on DAQ name
+# DAQ00: sensor 0, columns 0-1, rows 0-7
+# DAQ01: sensor 1, columns 0-1, rows 0-7
 if 'waveform_analyzer' in config and 'sensor_mapping' in config['waveform_analyzer']:
-    if 'daq01' in daq_name.lower():
-        # DAQ01: sensors 1 and 2
-        config['waveform_analyzer']['sensor_mapping']['sensor_ids'] = [1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2]
-        print(f"  sensor_ids set to: Channels 0-7 -> Sensor 1, Channels 8-15 -> Sensor 2")
-    elif 'daq02' in daq_name.lower():
-        # DAQ02: sensors 3 and 4
-        config['waveform_analyzer']['sensor_mapping']['sensor_ids'] = [3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4]
-        print(f"  sensor_ids set to: Channels 0-7 -> Sensor 3, Channels 8-15 -> Sensor 4")
+    if 'daq00' in daq_name.lower():
+        config['waveform_analyzer']['sensor_mapping']['sensor_ids'] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        config['waveform_analyzer']['sensor_mapping']['column_ids'] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]
+        config['waveform_analyzer']['sensor_mapping']['strip_ids'] = [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7]
+        print(f"  Sensor 0: Channels 0-7 -> Col 0 (rows 0-7), Channels 8-15 -> Col 1 (rows 0-7)")
+    elif 'daq01' in daq_name.lower():
+        config['waveform_analyzer']['sensor_mapping']['sensor_ids'] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+        config['waveform_analyzer']['sensor_mapping']['column_ids'] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]
+        config['waveform_analyzer']['sensor_mapping']['strip_ids'] = [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7]
+        print(f"  Sensor 1: Channels 0-7 -> Col 0 (rows 0-7), Channels 8-15 -> Col 1 (rows 0-7)")
     else:
         print(f"  WARNING: Unknown DAQ name '{daq_name}', using default sensor_ids")
 
-# Write updated configuration
+# Save as fixed config file for future use
+with open(fixed_config_file, 'w') as f:
+    json.dump(config, f, indent=2)
+print(f"  Created fixed config: {fixed_config_file}")
+
+# Also write as temporary config for this run
 with open(output_config_file, 'w') as f:
     json.dump(config, f, indent=2)
 
-print(f"Configuration saved to {output_config_file}")
-print(f"  input_dir: {config['waveform_converter']['input_dir']}")
-print(f"  output_dir: {config['common']['output_dir']}")
+print(f"  runnumber: {runnumber}")
+print(f"  -> Will create: {base_data_dir}/{run_str}/{daq_name}/output/")
 EOF
+    fi
 
     if [ $? -ne 0 ]; then
         echo "ERROR: Failed to create config for $daq_name"
@@ -359,6 +433,60 @@ if [ ${#FAILED_DAQS[@]} -eq 0 ]; then
     echo ""
     echo "=========================================="
     echo ""
+
+    # Run QA comparison if requested
+    if [ "$WITH_QA_COMPARISON" = true ]; then
+        echo "=========================================="
+        echo "Running QA Comparison"
+        echo "=========================================="
+
+        # Extract run number from BASE_DATA_DIR
+        RUN_ID=$(basename "$BASE_DATA_DIR")
+
+        # Check if merged HDF5 directory exists
+        MERGED_HDF5_DIR="${BASE_DATA_DIR}/merged/hdf5"
+        if [ ! -d "$MERGED_HDF5_DIR" ]; then
+            echo "WARNING: Merged HDF5 directory not found: $MERGED_HDF5_DIR"
+            echo "Skipping QA comparison. Please merge HDF5 files first."
+            echo ""
+        else
+            # Check if quality check files exist
+            DAQ00_QC="${BASE_DATA_DIR}/daq00/output/quality_check/quality_check.root"
+            DAQ01_QC="${BASE_DATA_DIR}/daq01/output/quality_check/quality_check.root"
+
+            if [ ! -f "$DAQ00_QC" ] || [ ! -f "$DAQ01_QC" ]; then
+                echo "WARNING: Quality check files not found for both DAQs"
+                echo "  DAQ00: $DAQ00_QC"
+                echo "  DAQ01: $DAQ01_QC"
+                echo "Skipping QA comparison."
+                echo ""
+            else
+                # Extract base directory (parent of run directory)
+                BASE_DIR=$(dirname "$BASE_DATA_DIR")
+
+                echo "Running QA comparison for run $RUN_ID..."
+                echo "  Base dir: $BASE_DIR"
+                echo "  Events:   $NUM_QA_EVENTS"
+                echo ""
+
+                # Run qa_comparison
+                if "${SCRIPT_DIR}/src/qa_comparison" "$RUN_ID" --base-dir "$BASE_DIR" --num-events "$NUM_QA_EVENTS"; then
+                    echo ""
+                    echo "SUCCESS: QA comparison completed"
+                    QA_OUTPUT="${BASE_DATA_DIR}/merged/qa"
+                    echo "  Output: $QA_OUTPUT"
+                    echo ""
+                else
+                    echo ""
+                    echo "WARNING: QA comparison failed"
+                    echo ""
+                fi
+            fi
+        fi
+
+        echo "=========================================="
+        echo ""
+    fi
 
     exit 0
 else

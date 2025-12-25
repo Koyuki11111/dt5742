@@ -628,8 +628,8 @@ bool ConvertBinaryToRootParallel(const WaveConverterConfig &cfg) {
     // Fill TTree with this chunk
     for (int evt = 0; evt < nEventsInChunk; ++evt) {
 
-      if ( kSetEventLimit && evt >= cfg.max_events()) {
-	std::cout<<"Reach the events limits (" <<evt<<")"<<std::endl;
+      if ( kSetEventLimit && totalEventsProcessed >= cfg.max_events()) {
+	std::cout<<"Reach the events limits (" <<totalEventsProcessed<<")"<<std::endl;
 	break;
       }
       

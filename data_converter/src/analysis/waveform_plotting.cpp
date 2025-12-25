@@ -48,7 +48,8 @@ void SaveWaveformPlots(TFile *waveformPlotsFile, int event, int channel,
 
   const int nSamples = static_cast<int>(amp.size());
   const int polarity = cfg.signal_polarity[channel];
-  const int stripID = cfg.strip_ids[channel];
+  // In the unified naming scheme, sensor_cols holds variable that acts as strip ID
+  const int stripID = cfg.sensor_cols[channel];
 
   const float analysisMin = cfg.analysis_region_min[channel];
   const float analysisMax = cfg.analysis_region_max[channel];

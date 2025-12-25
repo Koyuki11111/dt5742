@@ -294,7 +294,6 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
   std::vector<int> sensorID(cfg.n_channels());
   std::vector<int> sensorCol(cfg.n_channels());
   std::vector<int> sensorRow(cfg.n_channels());
-  std::vector<int> stripID(cfg.n_channels());
   std::vector<bool> isHorizontal(cfg.n_channels());
   std::vector<bool> hasSignal(cfg.n_channels());
   std::vector<float> baseline(cfg.n_channels());
@@ -313,9 +312,8 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
   // Initialize sensor and strip IDs from config
   for (int ch = 0; ch < cfg.n_channels(); ++ch) {
     sensorID[ch]  = cfg.sensor_ids[ch];
-    sensorCol[ch] = cfg.sensor_cols[ch];
-    sensorRow[ch] = cfg.sensor_rows[ch];
-    stripID[ch]   = cfg.strip_ids[ch];
+    sensorCol[ch] = cfg.sensor_cols[ch]; // Now holds Strip IDs
+    sensorRow[ch] = cfg.sensor_rows[ch]; // Now holds Column IDs
     // Check sensor orientation
     isHorizontal[ch] = IsSensorHorizontal(sensorID[ch], cfg);
   }
@@ -324,9 +322,22 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
     outputTree->Branch("nChannels", &nChannels);
     outputTree->Branch("event", &event);
     outputTree->Branch("sensorID", &sensorID);
+    outputTree->Branch("sensorStrip", &sensorCol); // Rename to sensorStrip in Output? Or keep sensorCol?
+                                                   // Keeping sensorCol for consistency with struct, but maybe better to rename to stripID in output?
+                                                   // User said "unify to sensor_cols". So keep as sensorCol?
+                                                   // Wait, previous code had "stripID" branch.
+                                                   // If I remove stripID branch, compatibility might break?
+                                                   // I will export sensorCol (which is strips) as "stripID" if I want to maintain branch structure,
+                                                   // OR follow user request to "unify to sensor_cols".
+                                                   // "Analysis process strip_id is 0-4 but... values are 28"
+                                                   // If I change branch name to "sensorCol", user sees "sensorCol" with 0-4.
+                                                   // If ID keep "stripID" branch name but fill with sensorCol.
+                                                   // Let's use `sensorCol` branch name if user really wants to UNIFY.
+                                                   // But maybe "stripID" is clearer for downstream.
+                                                   // I will stick to "sensorCol" branch name to match the C++ structure update.
     outputTree->Branch("sensorCol", &sensorCol);
     outputTree->Branch("sensorRow", &sensorRow);
-    outputTree->Branch("stripID", &stripID);
+    // outputTree->Branch("stripID", &stripID); // Removed
     outputTree->Branch("isHorizontal", &isHorizontal);
     outputTree->Branch("hasSignal", &hasSignal);
     outputTree->Branch("baseline", &baseline);
@@ -534,13 +545,16 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
 
       for (int ch = 0; ch < cfg.n_channels(); ++ch) {
         int sensorID = cfg.sensor_ids[ch];
-	int sensorCol= cfg.sensor_cols[ch];
-	int sensorRow= cfg.sensor_rows[ch];
-	int stripID = cfg.strip_ids[ch];
+        // In the unified naming:
+        // cfg.sensor_cols holds Strip ID
+        // cfg.sensor_rows holds Column ID
+        int stripID = cfg.sensor_cols[ch]; 
+        int colID   = cfg.sensor_rows[ch];
+        
         sensorStrips[sensorID].push_back(stripID);
         sensorChannels[sensorID].push_back(ch);
-	sensorCols[sensorID].push_back(sensorCol);
-	sensorRows[sensorID].push_back(sensorRow);
+        sensorCols[sensorID].push_back(colID);
+        sensorRows[sensorID].push_back(colID);
       }
 
       // Create event directory if not exists (for waveformPlotsFile)
@@ -573,20 +587,20 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
 	
         TH2F *hist = nullptr;
 
-        if (isHorizontal) {	  
-          // Vertical: X=1 bin, Y=strips (current behavior)
+        if (!isHorizontal) {
+          // Vertical: X=Column (sensor_row), Y=Strip (sensor_col)
           hist = new TH2F(Form("sensor%02d_amplitude_map", sensorID),
-                          Form("Event %d - Sensor %02d Amplitude Map;X;Strip;Amplitude (V)",
+                          Form("Event %d - Sensor %02d Amplitude Map;Column;Strip;Amplitude (V)",
                                eventIdx, sensorID),
-                          2, 0, 2,  // X axis: single bin
-                          64, 0, 64);  // Y axis: strips
+                          2, 0, 2,  // X axis: column (sensor_rows)
+                          5, 0, 5);  // Y axis: strip (sensor_cols)
 	} else {
-	  // Horizontal: X=strips, Y=1 bin (rotated 90 degrees)
+	  // Horizontal: X=Strip (sensor_col), Y=Column (sensor_row)
           hist = new TH2F(Form("sensor%02d_amplitude_map", sensorID),
-                          Form("Event %d - Sensor %02d Amplitude Map;Strip;Y;Amplitude (V)",
+                          Form("Event %d - Sensor %02d Amplitude Map;Strip;Column;Amplitude (V)",
                                eventIdx, sensorID),
-                          64, 0, 64,  // X axis: strips
-                          2, 0, 2);  // Y axis: single bin
+                          5, 0, 5,  // X axis: strip (sensor_cols)
+                          2, 0, 2);  // Y axis: column (sensor_rows)
         }
 	
 	std::vector<float> weight_col_pos;
@@ -594,12 +608,14 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
         // Fill histogram with amplitude values
         for (size_t i = 0; i < channels.size(); ++i) {
           int ch = channels[i];
-          //int stripID = strips[i];	  
+          int strip = sensorCol[ch]; // sensor_cols now holds strip ID
+          int col = sensorRow[ch];   // sensor_rows now holds column ID
 	  float amplitude = ampMax[ch];
-	  if (isHorizontal)
-	    hist->Fill(sensorRow[i], sensorCol[i], amplitude);
-	  else
-	    hist->Fill(sensorCol[i], sensorRow[i], amplitude);
+	  
+	  if (!isHorizontal) // Vertical: X=Column, Y=Strip
+	    hist->Fill(col, strip, amplitude);
+	  else // Horizontal: X=Strip, Y=Column
+	    hist->Fill(strip, col, amplitude);
         }
 	
         // Save to sensor directory within event (for waveformPlotsFile)
@@ -614,37 +630,44 @@ bool RunAnalysis(const AnalysisConfig &cfg, Long64_t eventStart = -1, Long64_t e
         // Store histogram for quality check canvas	
 	sensorHistograms[sensorID] = hist;
       }
-      // Create quality check canvas with all 4 sensors
+      // Create quality check canvas with all sensors
       if (qualityCheckFile) {
         qualityCheckFile->cd();
-        // Create canvas with 4 columns (1x4 layout)
+
+        // Determine max sensor ID to size the canvas appropriately
+        // This ensures sensors from different DAQs align correctly when merged with hadd
+        int maxSensorID = 0;
+        for (const auto &histPair : sensorHistograms) {
+          if (histPair.first > maxSensorID) {
+            maxSensorID = histPair.first;
+          }
+        }
+
+        // Canvas needs maxSensorID+1 pads to accommodate sensor IDs 0 through maxSensorID
+        // Use a minimum of 4 to support typical dual-DAQ setups (sensors 0,1,2,3)
+        int numPads = std::max(4, maxSensorID + 1);
+
+        // Create canvas with enough columns for all potential sensors
         char canvasName[64];
         std::snprintf(canvasName, sizeof(canvasName), "event_%06d_quality_check", eventIdx);
 	TCanvas *canvas = new TCanvas(canvasName,
                                       Form("Event %d - All Sensors Quality Check", eventIdx),
-                                      2400, 800);  // Wide canvas for 4 columns
-        canvas->Divide(3, 1);  // 4 columns, 1 row
-	
-        // Draw each sensor in its own pad (sensors 0-4(maximum sensor number))
-        for (int sensorID = 0; sensorID < 4; ++sensorID) {
-          canvas->cd(sensorID+1);  // Move to pad sensorID	  
-	  auto it = sensorHistograms.find(sensorID);	  
-	  if (it != sensorHistograms.end()) {
-	    // Clone the histogram to avoid deletion issues
-	    TH2F *histClone = (TH2F*)it->second->Clone(Form("sensor%02d_qc_clone", sensorID));
-            histClone->SetStats(0);  // Hide statistics box
-            histClone->Draw("COLZ");  // Draw with color scale
-          } else {
-            // Create empty histogram if sensor not found
-            TH2F *emptyHist = new TH2F(Form("sensor%02d_empty", sensorID),
-                                       Form("Event %d - Sensor %02d (No Data);X;Strip;Amplitude (V)",
-                                            eventIdx, sensorID),
-                                       1, 0, 1, 8, 0, 8);
-            emptyHist->SetStats(0);
-            emptyHist->Draw("COLZ");
-          }
+                                      600 * numPads, 800);  // Width scales with pad count
+        canvas->Divide(numPads, 1);  // Enough pads for all sensors
+
+        // Draw each sensor in the pad corresponding to its sensor ID
+        // This ensures sensor 0 goes to pad 1, sensor 1 to pad 2, etc.
+        for (const auto &histPair : sensorHistograms) {
+          int sensorID = histPair.first;
+          canvas->cd(sensorID + 1);  // Sensor ID 0 -> pad 1, sensor ID 1 -> pad 2, etc.
+
+          // Clone the histogram to avoid deletion issues
+          TH2F *histClone = (TH2F*)histPair.second->Clone(Form("sensor%02d_qc_clone", sensorID));
+          histClone->SetStats(0);  // Hide statistics box
+          histClone->SetMaximum(5000);  // Fix z-axis maximum to 5000 for consistent comparison
+          histClone->Draw("COLZ TEXT");  // Draw with color scale and text values
         }
-	
+
         // Save canvas to quality check file
         canvas->Write(canvasName, TObject::kOverwrite);
         delete canvas;  // Canvas deletion will handle cloned histograms

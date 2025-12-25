@@ -334,6 +334,25 @@ if [ "$RUN_STAGE2" = true ]; then
         fi
     fi
     echo ""
+
+    # Stage 2.5: Generate quality check plots
+    echo "Stage 2.5: Generating quality check plots..."
+    echo "  Config: $PIPELINE_CONFIG"
+    echo "  Input:  $OUTPUT_DIR/root/$ANALYSIS_ROOT"
+    echo "  Output: $OUTPUT_DIR/quality_check/quality_check.root"
+    echo ""
+
+    if [ ! -f "${SCRIPT_DIR}/fast_qa" ]; then
+        echo "WARNING: fast_qa executable not found at ${SCRIPT_DIR}/fast_qa"
+        echo "         Skipping quality check generation..."
+    else
+        "${SCRIPT_DIR}/fast_qa" --config "$PIPELINE_CONFIG"
+
+        if [ $? -ne 0 ]; then
+            echo "WARNING: Fast QA failed (continuing anyway)"
+        fi
+    fi
+    echo ""
 fi
 
 # Stage 3: Export to HDF5

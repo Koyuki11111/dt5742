@@ -34,10 +34,10 @@ ifeq ($(HDF5_LIBS),)
 endif
 
 # Targets
-TARGETS = convert_to_root analyze_waveforms export_to_hdf5
+TARGETS = convert_to_root analyze_waveforms export_to_hdf5 fast_qa
 
 # Default target
-all: $(TARGETS) parallel_analyze.sh
+all: $(TARGETS) parallel_analyze.sh qa_comparison
 
 # Stage 1: Convert binary/ASCII to ROOT
 convert_to_root: $(SRCDIR)/convert_to_root.cpp include/config/wave_converter_config.h $(SRCDIR)/utils/file_io.cpp include/utils/file_io.h
@@ -54,6 +54,11 @@ export_to_hdf5: $(SRCDIR)/export_to_hdf5.cpp
 	@echo "Building export_to_hdf5..."
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(ROOT_CFLAGS) $(HDF5_CFLAGS) -o $@ $< $(ROOT_LIBS) $(HDF5_LIBS) $(JSON_LIBS)
 
+# Fast QA: Generate quality check plots
+fast_qa: $(SRCDIR)/fast_qa.cpp include/config/analysis_config.h
+	@echo "Building fast_qa..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(ROOT_CFLAGS) -o $@ $(SRCDIR)/fast_qa.cpp $(ROOT_LIBS) $(JSON_LIBS)
+
 # Utility object (optional for reuse)
 utils/file_io.o: $(SRCDIR)/utils/file_io.cpp include/utils/file_io.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $(SRCDIR)/utils/file_io.cpp -o $@
@@ -63,6 +68,15 @@ parallel_analyze.sh:
 	@if [ -f parallel_analyze.sh ]; then \
 		chmod +x parallel_analyze.sh; \
 		echo "Made parallel_analyze.sh executable"; \
+	fi
+
+# Ensure qa_comparison is executable
+qa_comparison:
+	@if [ -f src/qa_comparison ]; then \
+		chmod +x src/qa_comparison; \
+		echo "Made src/qa_comparison executable"; \
+	else \
+		echo "WARNING: src/qa_comparison not found"; \
 	fi
 
 # Clean build artifacts
@@ -97,6 +111,7 @@ help:
 	@echo "  make convert_to_root     - Build stage 1 (binary/ASCII to ROOT)"
 	@echo "  make analyze_waveforms   - Build stage 2 (waveform analysis)"
 	@echo "  make export_to_hdf5      - Build stage 3 (ROOT to HDF5)"
+	@echo "  make fast_qa             - Build fast QA tool"
 	@echo ""
 	@echo "Usage:"
 	@echo "  1. Build: make"
@@ -105,6 +120,10 @@ help:
 	@echo "    ./convert_to_root --config wave_converter_config.json"
 	@echo "    ./analyze_waveforms --config analysis_config.json"
 	@echo "    ./export_to_hdf5 --mode raw --input waveforms.root --output waveforms.h5"
+	@echo "    ./fast_qa --config converter_config.json"
+	@echo ""
+	@echo "QA Tools:"
+	@echo "  ./src/qa_comparison <run_number> [--num-events N]  - Compare ROOT and HDF5 QA plots"
 
 # Test target - run a quick test of the pipeline
 test: $(TARGETS)

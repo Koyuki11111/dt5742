@@ -1,0 +1,557 @@
+#!/usr/bin/env python3
+"""
+QA Comparison Tool
+Compares ROOT and HDF5 outputs from dual-DAQ waveform analysis pipeline.
+
+This tool integrates four stages:
+  1. Merge ROOT QA plots from daq00 and daq01
+  2. Generate HDF5 QA plots from merged HDF5 files
+  3. Stitch HDF5 plots by sensor
+  4. Stack ROOT and HDF5 comparison images
+
+Usage:
+  ./qa_comparison <run_number> [--base-dir PATH] [--num-events N]
+  ./qa_comparison 139 --base-dir /home/blim/epic/data --num-events 5
+"""
+
+import argparse
+import glob
+import os
+import shutil
+import sys
+import tempfile
+
+# Check for required dependencies with helpful error messages
+try:
+    import ROOT
+except ImportError:
+    print("ERROR: ROOT Python module not found.", file=sys.stderr)
+    print("Please source ROOT environment before running this script:", file=sys.stderr)
+    print("  source /opt/root/bin/thisroot.sh", file=sys.stderr)
+    print("Or set up your ROOT installation path.", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    import h5py
+    import numpy as np
+except ImportError as e:
+    print(f"ERROR: Required Python module not found: {e}", file=sys.stderr)
+    print("Please install: pip install h5py numpy", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    import matplotlib
+    matplotlib.use('Agg')  # Non-interactive backend
+    import matplotlib.pyplot as plt
+except ImportError:
+    print("ERROR: matplotlib not found.", file=sys.stderr)
+    print("Please install: pip install matplotlib", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    print("ERROR: PIL (Pillow) not found.", file=sys.stderr)
+    print("Please install: pip install Pillow", file=sys.stderr)
+    sys.exit(1)
+
+
+# ============================================================================
+# Stage 1: Merge ROOT QA Plots
+# ============================================================================
+
+def merge_root_qa_plots(file0_path, file1_path, output_dir, num_events=5):
+    """Merge quality_check.root files from daq00 and daq01."""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    f0 = ROOT.TFile.Open(file0_path, "READ")
+    f1 = ROOT.TFile.Open(file1_path, "READ")
+
+    if not f0 or f0.IsZombie():
+        print(f"Error opening {file0_path}")
+        return False
+    if not f1 or f1.IsZombie():
+        print(f"Error opening {file1_path}")
+        return False
+
+    # Get events directory
+    dir0 = f0.Get("events")
+    dir1 = f1.Get("events")
+
+    if not dir0 or not dir1:
+        print("Error: 'events' directory not found in one of the files")
+        return False
+
+    # Assuming keys are "event_XXXXXX_quality_check"
+    keys0 = [k.GetName() for k in dir0.GetListOfKeys() if k.GetName().startswith("event_")]
+    keys0.sort()
+
+    print(f"Found {len(keys0)} events in file 0. Processing first {num_events}...")
+
+    ROOT.gStyle.SetOptStat(0)
+    ROOT.gStyle.SetPalette(ROOT.kRainBow)
+
+    for key_name in keys0[:num_events]:
+        print(f"Processing {key_name}...")
+
+        c0 = dir0.Get(key_name)
+        c1 = dir1.Get(key_name)
+
+        if not c0 or not c1:
+            print(f"  Missing canvas for {key_name} in one file. Skipping.")
+            continue
+
+        # Extract histograms
+        hists = {}  # Map sensor_id -> combined histogram
+
+        # Helper to extract and add
+        def extract_from_canvas(canvas):
+            primitives = canvas.GetListOfPrimitives()
+            for obj in primitives:
+                # The canvas is divided into pads. We need to go into pads.
+                if obj.InheritsFrom("TPad"):
+                    pad_prims = obj.GetListOfPrimitives()
+                    for prim in pad_prims:
+                        if prim.InheritsFrom("TH2"):
+                            name = prim.GetName()
+                            # name is "sensorXX_amplitude_map"
+                            if "sensor" in name:
+                                sensor_id = int(name.split("sensor")[1].split("_")[0])
+                                if sensor_id not in hists:
+                                    hists[sensor_id] = prim.Clone(f"merged_sensor{sensor_id}_{key_name}")
+                                    hists[sensor_id].SetDirectory(0)
+                                else:
+                                    hists[sensor_id].Add(prim)
+
+        extract_from_canvas(c0)
+        extract_from_canvas(c1)
+
+        # Now draw merged histograms
+        num_sensors = len(hists)
+        if num_sensors == 0:
+            continue
+
+        c_out = ROOT.TCanvas(f"merged_{key_name}", f"Merged {key_name}", 600 * num_sensors, 600)
+        c_out.Divide(num_sensors, 1)
+
+        sorted_ids = sorted(hists.keys())
+        for i, sid in enumerate(sorted_ids):
+            c_out.cd(i + 1)
+            h = hists[sid]
+            h.SetTitle(f"Merged Sensor {sid} - {key_name}")
+            # Ensure proper range if needed, or let auto-scale
+            h.SetMinimum(0)
+            h.SetMaximum(300)  # Set to 300 for better color contrast
+            h.Draw("COLZ TEXT")
+
+        out_name = os.path.join(output_dir, f"merged_{key_name}.png")
+        c_out.SaveAs(out_name)
+        print(f"  Saved {out_name}")
+
+    f0.Close()
+    f1.Close()
+    return True
+
+
+# ============================================================================
+# Stage 2: Generate HDF5 QA Plots
+# ============================================================================
+
+def generate_hdf5_qa_plots(input_dir, output_dir, num_events=5):
+    """Generate QA plots from HDF5 files."""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"Created output directory: {output_dir}")
+
+    # Find HDF5 files
+    h5_files = sorted(glob.glob(os.path.join(input_dir, "*.h5")))
+    if not h5_files:
+        print(f"No HDF5 files found in {input_dir}")
+        return False
+
+    print(f"Found {len(h5_files)} HDF5 files: {[os.path.basename(f) for f in h5_files]}")
+
+    for h5_file in h5_files:
+        file_name = os.path.basename(h5_file)
+        print(f"\nProcessing {file_name}...")
+
+        try:
+            with h5py.File(h5_file, 'r') as f:
+                if 'Hits' not in f:
+                    print(f"  WARNING: 'Hits' dataset not found in {file_name}. Skipping.")
+                    continue
+
+                data = f['Hits'][:]
+
+                # Check if data is empty
+                if len(data) == 0:
+                    print(f"  WARNING: 'Hits' is empty in {file_name}. Skipping.")
+                    continue
+
+                # Detect format and extract fields
+                field_names = data.dtype.names
+
+                # Check if this is Corryvreckan format or export_to_hdf5 format
+                is_corryvreckan = 'trigger_number' in field_names
+
+                if is_corryvreckan:
+                    # Corryvreckan format: trigger_number, charge, column, row
+                    print(f"  Detected Corryvreckan format")
+                    events = data['trigger_number']
+                    amp_max = np.abs(data['charge'])  # Use absolute value of charge
+                    col_ids = data['column']
+                    strip_ids = data['row']
+
+                    # Extract sensor ID from filename (e.g., sensor0_merged_analysis.h5 -> 0)
+                    import re
+                    match = re.search(r'sensor(\d+)', file_name)
+                    if match:
+                        sensor_id = int(match.group(1))
+                        sensor_ids = np.full(len(data), sensor_id)
+                    else:
+                        print(f"  WARNING: Cannot extract sensor ID from filename: {file_name}")
+                        sensor_ids = np.zeros(len(data), dtype=int)
+                else:
+                    # export_to_hdf5 format: event, ampMax, column_id, strip_id, sensor_id
+                    print(f"  Detected export_to_hdf5 format")
+                    events = data['event']
+                    amp_max = data['ampMax']
+                    col_ids = data['column_id']
+                    strip_ids = data['strip_id']
+                    sensor_ids = data['sensor_id']
+
+                unique_sensors = np.unique(sensor_ids)
+
+                # 1. Summary Histogram of Amplitude
+                # Determine appropriate range based on data
+                amp_min, amp_max_val = np.min(amp_max), np.max(amp_max)
+                if is_corryvreckan:
+                    # For Corryvreckan, charge values may be small
+                    hist_range = (0, max(500, amp_max_val * 1.1))
+                else:
+                    # For export_to_hdf5, ADC values typically 0-4096
+                    hist_range = (0, 4096)
+
+                plt.figure(figsize=(10, 6))
+                plt.hist(amp_max, bins=100, range=hist_range, histtype='stepfilled', alpha=0.7, label='All Channels')
+                plt.title(f"Amplitude Distribution - {file_name}")
+                plt.xlabel("Amplitude (Charge)" if is_corryvreckan else "Amplitude (ADC)")
+                plt.ylabel("Counts")
+                plt.yscale('log')
+                plt.grid(True, which="both", ls="-", alpha=0.5)
+                plt.legend()
+
+                summary_plot_name = f"summary_amp_{os.path.splitext(file_name)[0]}.png"
+                plt.savefig(os.path.join(output_dir, summary_plot_name))
+                plt.close()
+                print(f"  Saved summary plot: {summary_plot_name}")
+
+                # 2. Event-by-Event Amplitude Maps
+                unique_events = np.unique(events)
+                print(f"  Total events: {len(unique_events)}. Plotting first {num_events}...")
+
+                for i, ev_id in enumerate(unique_events[:num_events]):
+                    # Mask for current event
+                    mask = (events == ev_id)
+
+                    if np.sum(mask) == 0:
+                        continue
+
+                    # Determine grid size for this event (and sensor)
+                    for sid in unique_sensors:
+                        # Create combined mask for event and sensor
+                        combined_mask = mask & (sensor_ids == sid)
+
+                        if np.sum(combined_mask) == 0:
+                            continue
+
+                        s_cols = col_ids[combined_mask]
+                        s_strips = strip_ids[combined_mask]
+                        s_amps = amp_max[combined_mask]
+
+                        # Determine bounds
+                        min_col, max_col = np.min(s_cols), np.max(s_cols)
+                        min_strip, max_strip = np.min(s_strips), np.max(s_strips)
+
+                        # Calculate bin edges to center the pixels
+                        x_bins = np.arange(min_col - 0.5, max_col + 1.5, 1)
+                        y_bins = np.arange(min_strip - 0.5, max_strip + 1.5, 1)
+
+                        # Determine colorbar range based on format
+                        if is_corryvreckan:
+                            vmax = max(100, np.percentile(s_amps[s_amps > 0], 95) * 1.2) if np.any(s_amps > 0) else 100
+                            label = 'Charge'
+                        else:
+                            vmax = 300
+                            label = 'Amplitude (ADC)'
+
+                        plt.figure(figsize=(8, 6))
+                        h = plt.hist2d(s_cols, s_strips, weights=s_amps, bins=[x_bins, y_bins],
+                                       cmin=0.1, cmap='viridis', vmin=0, vmax=vmax)
+                        plt.colorbar(h[3], label=label)
+
+                        plt.title(f"Event {ev_id} - Sensor {sid}\n{file_name}")
+                        plt.xlabel("Column ID")
+                        plt.ylabel("Strip ID")
+                        plt.xticks(np.arange(min_col, max_col + 1, 1))
+                        plt.yticks(np.arange(min_strip, max_strip + 1, 1))
+                        plt.grid(True, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
+
+                        # Annotate values
+                        for sc, ss, sa in zip(s_cols, s_strips, s_amps):
+                            plt.text(sc, ss, f"{sa:.0f}", ha='center', va='center', color='white', fontsize=8)
+
+                        plot_name = f"event_{ev_id:06d}_sensor{sid}_{os.path.splitext(file_name)[0]}.png"
+                        plt.savefig(os.path.join(output_dir, plot_name))
+                        plt.close()
+                        print(f"    Saved event map: {plot_name}")
+
+        except Exception as e:
+            print(f"  ERROR processing {file_name}: {e}")
+            return False
+
+    return True
+
+
+# ============================================================================
+# Stage 3: Stitch HDF5 Plots
+# ============================================================================
+
+def stitch_hdf5_plots(input_dir, output_dir, num_events=5):
+    """Stitch HDF5 plots by sensor for each event."""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Sensors 0, 1, 2, 3
+    sensors = [0, 1, 2, 3]
+
+    for i in range(num_events):
+        event_id = i
+        images = []
+
+        # Find images for this event for each sensor
+        for sid in sensors:
+            # Pattern: event_000000_sensor0_sensor0_merged_analysis.png
+            pattern = os.path.join(input_dir, f"event_{event_id:06d}_sensor{sid}_*.png")
+            files = glob.glob(pattern)
+            if files:
+                images.append(Image.open(files[0]))
+            else:
+                print(f"Warning: Missing plot for Event {event_id}, Sensor {sid}")
+                images.append(None)
+
+        # Stitch them horizontally
+        if not any(images):
+            continue
+
+        # Filter None
+        valid_images = [img for img in images if img is not None]
+        if not valid_images:
+            continue
+
+        # Assume all same size
+        w, h = valid_images[0].size
+        total_w = w * len(valid_images)
+
+        stitched = Image.new('RGB', (total_w, h), (255, 255, 255))
+
+        x_offset = 0
+        for img in valid_images:
+            stitched.paste(img, (x_offset, 0))
+            x_offset += w
+
+        out_name = os.path.join(output_dir, f"stitched_hdf5_event_{event_id:06d}.png")
+        stitched.save(out_name)
+        print(f"Saved {out_name}")
+
+    return True
+
+
+# ============================================================================
+# Stage 4: Stack Comparison Images
+# ============================================================================
+
+def stack_comparison_images(input_dir, output_dir, num_events=5):
+    """Stack ROOT and HDF5 comparison images vertically."""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    for i in range(num_events):
+        event_id = i
+
+        # Define file paths
+        root_img_path = os.path.join(input_dir, f"merged_event_{event_id:06d}_quality_check.png")
+        hdf5_img_path = os.path.join(input_dir, f"stitched_hdf5_event_{event_id:06d}.png")
+
+        # Check if both exist
+        if not os.path.exists(root_img_path):
+            print(f"Missing ROOT image for event {event_id}: {root_img_path}")
+            continue
+        if not os.path.exists(hdf5_img_path):
+            print(f"Missing HDF5 image for event {event_id}: {hdf5_img_path}")
+            continue
+
+        try:
+            img_top = Image.open(root_img_path)
+            img_bot = Image.open(hdf5_img_path)
+
+            # Target width is the max of the two
+            target_w = max(img_top.width, img_bot.width)
+
+            total_h = img_top.height + img_bot.height + 60  # 60px for labels/spacing
+
+            canvas = Image.new('RGB', (target_w, total_h), (255, 255, 255))
+
+            # Draw labels
+            draw = ImageDraw.Draw(canvas)
+            # Try to load a default font, otherwise use default
+            try:
+                font = ImageFont.truetype("DejaVuSans-Bold.ttf", 20)
+            except:
+                font = ImageFont.load_default()
+
+            # Paste Top (ROOT)
+            x_top = (target_w - img_top.width) // 2
+            y_top = 30
+            canvas.paste(img_top, (x_top, y_top))
+            draw.text((10, 5), "ROOT Merged (Original)", fill="black", font=font)
+
+            # Paste Bottom (HDF5)
+            x_bot = (target_w - img_bot.width) // 2
+            y_bot = y_top + img_top.height + 30
+            canvas.paste(img_bot, (x_bot, y_bot))
+            draw.text((10, y_top + img_top.height + 5), "HDF5 Stitched (Reconstructed)", fill="black", font=font)
+
+            out_name = os.path.join(output_dir, f"comparison_event_{event_id:06d}.png")
+            canvas.save(out_name)
+            print(f"Saved {out_name}")
+
+        except Exception as e:
+            print(f"Error processing event {event_id}: {e}")
+            return False
+
+    return True
+
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="QA Comparison: Compare ROOT and HDF5 outputs from dual-DAQ analysis",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s 139
+  %(prog)s 139 --base-dir /data --num-events 10
+  %(prog)s 000042 --base-dir /home/user/epic/data
+        """
+    )
+    parser.add_argument("run_number", type=str,
+                        help="Run number (will be zero-padded to 6 digits)")
+    parser.add_argument("--base-dir", type=str, default="/home/blim/epic/data",
+                        help="Base data directory (default: /home/blim/epic/data)")
+    parser.add_argument("--num-events", type=int, default=5,
+                        help="Number of events to process (default: 5)")
+
+    args = parser.parse_args()
+
+    # Zero-pad run number to 6 digits
+    try:
+        run_num = int(args.run_number)
+        run_str = f"{run_num:06d}"
+    except ValueError:
+        # If it's already a string (non-numeric), use as-is
+        run_str = args.run_number
+
+    # Define paths
+    daq00_qc = os.path.join(args.base_dir, run_str, "daq00", "output", "quality_check", "quality_check.root")
+    daq01_qc = os.path.join(args.base_dir, run_str, "daq01", "output", "quality_check", "quality_check.root")
+    merged_hdf5_dir = os.path.join(args.base_dir, run_str, "merged", "hdf5")
+    output_qa_dir = os.path.join(args.base_dir, run_str, "merged", "qa")
+
+    print("=" * 60)
+    print(f"QA Comparison Tool - Run {run_str}")
+    print("=" * 60)
+    print(f"Base Dir:         {args.base_dir}")
+    print(f"DAQ00 QC:         {daq00_qc}")
+    print(f"DAQ01 QC:         {daq01_qc}")
+    print(f"Merged HDF5 Dir:  {merged_hdf5_dir}")
+    print(f"Output QA Dir:    {output_qa_dir}")
+    print(f"Events to plot:   {args.num_events}")
+    print("=" * 60)
+
+    # Check inputs
+    if not os.path.exists(daq00_qc):
+        print(f"ERROR: DAQ00 QC file not found: {daq00_qc}")
+        return 1
+    if not os.path.exists(daq01_qc):
+        print(f"ERROR: DAQ01 QC file not found: {daq01_qc}")
+        return 1
+    if not os.path.isdir(merged_hdf5_dir):
+        print(f"ERROR: Merged HDF5 directory not found: {merged_hdf5_dir}")
+        return 1
+
+    # Create temporary working directory
+    with tempfile.TemporaryDirectory(prefix=f"qa_plots_{run_str}_") as temp_dir:
+        print(f"\nUsing temporary directory: {temp_dir}")
+        hdf5_temp_dir = os.path.join(temp_dir, "hdf5")
+        os.makedirs(hdf5_temp_dir, exist_ok=True)
+
+        # Stage 1: Merge ROOT plots
+        print("\n" + "=" * 60)
+        print("[1/4] Merging ROOT QA plots...")
+        print("=" * 60)
+        if not merge_root_qa_plots(daq00_qc, daq01_qc, temp_dir, args.num_events):
+            print("ERROR: Failed to merge ROOT QA plots")
+            return 1
+
+        # Stage 2: Generate HDF5 plots
+        print("\n" + "=" * 60)
+        print("[2/4] Generating HDF5 QA plots...")
+        print("=" * 60)
+        if not generate_hdf5_qa_plots(merged_hdf5_dir, hdf5_temp_dir, args.num_events):
+            print("ERROR: Failed to generate HDF5 QA plots")
+            return 1
+
+        # Stage 3: Stitch HDF5 plots
+        print("\n" + "=" * 60)
+        print("[3/4] Stitching HDF5 plots...")
+        print("=" * 60)
+        if not stitch_hdf5_plots(hdf5_temp_dir, temp_dir, args.num_events):
+            print("ERROR: Failed to stitch HDF5 plots")
+            return 1
+
+        # Stage 4: Stack comparison images
+        print("\n" + "=" * 60)
+        print("[4/4] Stacking comparison images...")
+        print("=" * 60)
+        if not stack_comparison_images(temp_dir, temp_dir, args.num_events):
+            print("ERROR: Failed to stack comparison images")
+            return 1
+
+        # Move results to output directory
+        print("\n" + "=" * 60)
+        print("Moving final comparisons to output directory...")
+        print("=" * 60)
+        os.makedirs(output_qa_dir, exist_ok=True)
+
+        comparison_files = glob.glob(os.path.join(temp_dir, "comparison_event_*.png"))
+        for cmp_file in comparison_files:
+            dest = os.path.join(output_qa_dir, os.path.basename(cmp_file))
+            shutil.move(cmp_file, dest)
+            print(f"  Moved: {os.path.basename(cmp_file)}")
+
+    print("\n" + "=" * 60)
+    print("QA Comparison Complete!")
+    print("=" * 60)
+    print(f"Comparison plots available in:\n  {output_qa_dir}")
+    print("=" * 60)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
