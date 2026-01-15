@@ -1,7 +1,7 @@
 {
   "common": {
-    "output_dir": "/Users/syano/data",
-    "runnumber": 239,
+    "output_dir": "/data",
+    "runnumber": 139,
     "daq_name": "daq01",
     "n_channels": 16,
     "max_cores": 8,
@@ -16,7 +16,7 @@
   },
   "waveform_converter": {
     "input_pattern": "wave_%d.dat",
-    "input_dir": "/Users/syano/data",
+    "input_dir": "/data",
     "input_is_ascii": false,
     "special_channel_file": "TR_0_0.dat",
     "enable_special_override": false,

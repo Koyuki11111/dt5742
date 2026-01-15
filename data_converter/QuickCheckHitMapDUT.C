@@ -50,7 +50,7 @@ void QuickCheckHitMapDUT(int runnumber=1){
   TTree *ttree[2];
 
   for (int daq=0; daq<2; daq++) {
-    fname[daq] = Form("/Users/syano/data/%s/daq0%d/output/root/waveforms_analyzed.root",to6digits(runnumber).c_str(),daq);
+    fname[daq] = Form("/data/%s/daq0%d/output/root/waveforms_analyzed.root",to6digits(runnumber).c_str(),daq);
     if (!CheckFileExist(fname[daq])) {
       cout<<"[ERROR] The file "<<fname[daq]<<" doesn't exist."<<endl;
       cout<<"        Check run number or if you execute analyze_waveforms (stage-2) again!"<<endl;
